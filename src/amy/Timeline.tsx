@@ -1,0 +1,158 @@
+import { useMemo } from "react";
+import { InstallRecord, expiresAt, daysLeftLabel, urgency } from "./history";
+import type { DeviceInfo } from "../Device";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DAYS = 7;
+/** Phase 2 auto-refresh re-signs this long before expiry. */
+const REFRESH_LEAD_MS = 2 * DAY_MS;
+
+type Props = {
+  installs: InstallRecord[];
+  connected: DeviceInfo[];
+  selectedUuid: string | null;
+  busy: boolean;
+  onResign: (rec: InstallRecord) => void;
+  onForget: (rec: InstallRecord) => void;
+};
+
+function startOfToday(now: Date) {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+export function Timeline({ installs, connected, selectedUuid, busy, onResign, onForget }: Props) {
+  const now = new Date();
+  const weekStart = startOfToday(now);
+  const weekEnd = new Date(weekStart.getTime() + DAYS * DAY_MS);
+  const span = weekEnd.getTime() - weekStart.getTime();
+  const pct = (t: number) => Math.min(100, Math.max(0, ((t - weekStart.getTime()) / span) * 100));
+
+  const days = useMemo(
+    () =>
+      Array.from({ length: DAYS }, (_, i) => {
+        const d = new Date(weekStart.getTime() + i * DAY_MS);
+        return {
+          key: d.toDateString(),
+          label: d.toLocaleDateString(undefined, { weekday: "short" }).toUpperCase(),
+          num: d.getDate(),
+          today: i === 0,
+          friday: d.getDay() === 5,
+        };
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [weekStart.getTime()],
+  );
+
+  // One lane per phone that has installs (plus connected phones with none yet).
+  const lanes = useMemo(() => {
+    const map = new Map<string, { uuid: string; name: string; recs: InstallRecord[] }>();
+    for (const r of installs) {
+      if (!map.has(r.deviceUuid)) map.set(r.deviceUuid, { uuid: r.deviceUuid, name: r.deviceName, recs: [] });
+      map.get(r.deviceUuid)!.recs.push(r);
+    }
+    for (const d of connected) {
+      if (!map.has(d.uuid)) map.set(d.uuid, { uuid: d.uuid, name: d.name, recs: [] });
+    }
+    for (const l of map.values()) l.recs.sort((a, b) => expiresAt(a).getTime() - expiresAt(b).getTime());
+    return [...map.values()];
+  }, [installs, connected]);
+
+  const nowPct = pct(now.getTime());
+
+  return (
+    <div className="amy-timeline">
+      <div className="amy-tl-head">
+        <span className="amy-tl-lane-label" />
+        <div className="amy-tl-days">
+          {days.map((d) => (
+            <span key={d.key} className={"amy-tl-day" + (d.today ? " today" : "") + (d.friday ? " friday" : "")}>
+              {d.today ? "TODAY" : d.label} <b>{d.num}</b>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {lanes.length === 0 && (
+        <div className="amy-tl-empty">
+          Nothing tracked yet. Apps you install from A.M.Y Loader appear here with their 7-day countdown.
+        </div>
+      )}
+
+      {lanes.map((lane) => {
+        const dev = connected.find((d) => d.uuid === lane.uuid);
+        return (
+          <div key={lane.uuid} className={"amy-tl-lane" + (lane.uuid === selectedUuid ? " selected" : "")}>
+            <div className="amy-tl-lane-label">
+              <span className="amy-tl-phone">{lane.name}</span>
+              <span className={"amy-chip " + (dev ? (dev.connectionType === "Network" ? "wifi" : "usb") : "offline")}>
+                {dev ? (dev.connectionType === "Network" ? "WI-FI" : "USB") : "NOT CONNECTED"}
+              </span>
+            </div>
+            <div className="amy-tl-track">
+              {days.map((d, i) => (
+                <span key={d.key} className={"amy-tl-gridline" + (d.friday ? " friday" : "")} style={{ left: `${(i / DAYS) * 100}%` }} />
+              ))}
+              <span className="amy-tl-now" style={{ left: `${nowPct}%` }} aria-hidden="true" />
+              {lane.recs.length === 0 && <span className="amy-tl-lane-empty">No apps tracked on this phone yet</span>}
+              {lane.recs.map((r, idx) => {
+                const start = Math.max(new Date(r.signedAt).getTime(), weekStart.getTime());
+                const end = expiresAt(r).getTime();
+                const left = pct(start);
+                const width = Math.max(pct(end) - left, 6);
+                const refreshAt = end - REFRESH_LEAD_MS;
+                const showDiamond = refreshAt > now.getTime() && refreshAt < weekEnd.getTime();
+                const u = urgency(r, now);
+                return (
+                  <div
+                    key={r.id}
+                    className={"amy-tl-bar " + u}
+                    style={{ left: `${left}%`, width: `${width}%`, top: `${6 + idx * 34}px` }}
+                    title={`${r.app} — signed ${new Date(r.signedAt).toLocaleString()} with ${r.appleId}, expires ${expiresAt(r).toLocaleString()}`}
+                  >
+                    {showDiamond && (
+                      <span
+                        className="amy-tl-diamond"
+                        style={{ left: `${((refreshAt - start) / Math.max(1, end - start)) * 100}%` }}
+                        aria-hidden="true"
+                      />
+                    )}
+                    <span className="amy-tl-bar-name">{r.app}</span>
+                    <span className="amy-tl-bar-left">{daysLeftLabel(r, now)}</span>
+                    <button
+                      className="amy-tl-bar-btn"
+                      aria-label={`Re-sign ${r.app} now`}
+                      title="Re-sign now"
+                      disabled={busy}
+                      onClick={() => onResign(r)}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true"><path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7" /></svg>
+                    </button>
+                    <button
+                      className="amy-tl-bar-btn"
+                      aria-label={`Stop tracking ${r.app}`}
+                      title="Stop tracking"
+                      disabled={busy}
+                      onClick={() => onForget(r)}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                    </button>
+                  </div>
+                );
+              })}
+              <span style={{ display: "block", height: `${Math.max(1, lane.recs.length) * 34 + 8}px` }} />
+            </div>
+          </div>
+        );
+      })}
+
+      <div className="amy-tl-legend">
+        <span><i className="amy-legend-sw ok" /> 4+ days</span>
+        <span><i className="amy-legend-sw soon" /> 1–3 days</span>
+        <span><i className="amy-legend-sw urgent" /> under a day</span>
+        <span><i className="amy-legend-diamond" /> auto-refresh point (Phase 2)</span>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,81 @@
+name: Check for iloader engine updates
+
+# Every Monday, see whether iloader (the engine A.M.Y Loader is built on) has
+# new commits. Apple keeps changing sign-in, and iloader's fixes are what keep
+# sideloading working, so they need pulling in promptly.
+#   - merges cleanly  -> opens a pull request to review and merge
+#   - needs a human   -> opens an issue explaining what conflicted
+# A.M.Y keeps its branding in its own files (src/amy/, src-tauri/amy.conf.json,
+# src-tauri/amy-icons/), so most engine updates merge without conflicts.
+on:
+  schedule:
+    - cron: "17 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch iloader
+        id: fetch
+        run: |
+          git remote add upstream https://github.com/nab138/iloader.git
+          git fetch --no-tags upstream main
+          behind=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$(git rev-parse --short upstream/main)" >> "$GITHUB_OUTPUT"
+          echo "iloader is $behind commit(s) ahead of A.M.Y Loader"
+
+      - name: Merge and open a pull request (or an issue)
+        if: steps.fetch.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BEHIND: ${{ steps.fetch.outputs.behind }}
+          UPSHA: ${{ steps.fetch.outputs.upstream_sha }}
+        run: |
+          set -u
+          git config user.name "amy-loader-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="engine-sync/${UPSHA}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "A sync branch for ${UPSHA} already exists; nothing to do."; exit 0
+          fi
+          git checkout -b "$branch"
+          log=$(git log --oneline HEAD..upstream/main | head -40)
+
+          if ! git merge --no-edit --no-ff upstream/main; then
+            # Conflicts we can settle automatically:
+            #  - iloader's own workflows, deliberately removed in A.M.Y Loader
+            #  - README.md, which is A.M.Y's own
+            for f in .github/workflows/build.yml .github/workflows/download-count.yml; do
+              git rm -q --ignore-unmatch "$f" || true
+            done
+            if git diff --name-only --diff-filter=U | grep -qx "README.md"; then
+              git checkout --ours README.md && git add README.md
+            fi
+            remaining=$(git diff --name-only --diff-filter=U)
+            if [ -n "$remaining" ]; then
+              git merge --abort
+              body=$(printf 'iloader has %s new commit(s) (up to `%s`) that need a hand merge because these A.M.Y files conflict:\n\n```\n%s\n```\n\nNew iloader commits:\n\n```\n%s\n```\n' "$BEHIND" "$UPSHA" "$remaining" "$log")
+              gh issue create --title "iloader engine update needs a manual merge (${UPSHA})" --body "$body" || true
+              exit 0
+            fi
+            git commit --no-edit
+          fi
+
+          git push origin "$branch"
+          body=$(printf 'Pulls in %s new iloader commit(s) up to `%s`. Merging to main triggers a new Windows build.\n\nRemember to update `UPSTREAM_ENGINE_VERSION` in `src/amy/meta.ts` if iloader released a new version.\n\n```\n%s\n```\n' "$BEHIND" "$UPSHA" "$log")
+          if ! gh pr create --base main --head "$branch" --title "Engine update from iloader (${UPSHA})" --body "$body"; then
+            # New repos block Actions from opening PRs by default; fall back to an issue.
+            gh issue create --title "iloader engine update ready on branch ${branch}" \
+              --body "$(printf '%s\n\nOpen a pull request from `%s` into `main` to take it (Actions is not allowed to open PRs in this repo).' "$body" "$branch")" || true
+          fi

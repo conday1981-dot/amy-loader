@@ -19,10 +19,21 @@ export const Device = ({
   selectedDevice,
   setSelectedDevice,
   registerRefresh,
+  onDevicesChange,
+  accountFor,
+  loggedInAs,
+  onSwitchAccount,
 }: {
   selectedDevice: DeviceInfo | null;
   setSelectedDevice: (device: DeviceInfo | null) => void;
   registerRefresh?: (fn?: () => void) => void;
+  /** A.M.Y: report the connected phones up to the shell (timeline lanes). */
+  onDevicesChange?: (devices: DeviceInfo[]) => void;
+  /** A.M.Y: the Apple ID last used for a phone, if known. */
+  accountFor?: (uuid: string) => string | undefined;
+  loggedInAs?: string | null;
+  /** A.M.Y: switch the signed-in Apple ID to the one this phone uses. */
+  onSwitchAccount?: (email: string) => void;
 }) => {
   const { t } = useTranslation();
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
@@ -109,6 +120,7 @@ export const Device = ({
         }
 
         setDevices(devices);
+        onDevicesChange?.(devices);
         if (selectedDevice) {
           const stillAvailable = devices.find(
             (d) => d.id === selectedDevice.id,
@@ -138,6 +150,7 @@ export const Device = ({
         resolve(devices.length);
       } catch (e) {
         setDevices([]);
+        onDevicesChange?.([]);
         selectDevice(null);
         listingDevices.current = false;
         reject(e);
@@ -197,38 +210,55 @@ export const Device = ({
           </button>
         </div>
       </Modal>
-      <h2 style={{ marginTop: 0 }}>{t("device.title")}</h2>
-      <div className="credentials-container">
+      <div className="amy-phones">
         {devices.length === 0 && (
-          <div>{t("device.no_devices_found_period")}</div>
+          <div className="amy-phones-empty">
+            <strong>{t("device.no_devices_found_period")}</strong>
+            <span>Plug a phone in by cable and unlock it, or connect it to the same Wi-Fi with “Show this iPhone when on Wi-Fi” ticked in iTunes.</span>
+          </div>
         )}
         {devices.map((device) => {
           const isActive = selectedDevice?.id === device.id;
+          const account = accountFor?.(device.uuid);
+          const mismatch = isActive && account && loggedInAs && account !== loggedInAs;
           return (
-            <button
-              key={device.id}
-              className={"device-card card" + (isActive ? " active" : "")}
-              onClick={() => selectDevice(device)}
-              disabled={waitingToPair !== null}
-            >
-              <div className="device-meta">
-                <span className="device-name">{device.name}</span>
-                <span className="device-connection">
-                  {device.connectionType}
+            <div key={device.id} className={"amy-phone" + (isActive ? " active" : "")}>
+              <button
+                className="amy-phone-main"
+                onClick={() => selectDevice(device)}
+                disabled={waitingToPair !== null}
+                aria-pressed={isActive}
+              >
+                <svg width="28" height="44" viewBox="0 0 30 46" aria-hidden="true" className="amy-phone-icon">
+                  <rect x="1.5" y="1.5" width="27" height="43" rx="6" fill="none" stroke="currentColor" strokeWidth="1.6" />
+                  <rect x="11" y="5" width="8" height="2" rx="1" fill="currentColor" />
+                </svg>
+                <span className="amy-phone-text">
+                  <span className="amy-phone-name">
+                    {device.name}
+                    <span className={"amy-chip " + (device.connectionType === "Network" ? "wifi" : "usb")}>
+                      {device.connectionType === "Network" ? "WI-FI" : device.connectionType === "USB" ? "USB" : "?"}
+                    </span>
+                  </span>
+                  <span className="amy-phone-sub">
+                    iOS {device.version}
+                    {account ? ` · usually ${account}` : ""}
+                  </span>
                 </span>
-              </div>
-              {isActive && (
-                <span className="device-selected-pill">
-                  {t("device.selected")}
-                </span>
+                {isActive && <span className="amy-selected-pill">{t("device.selected")}</span>}
+              </button>
+              {mismatch && onSwitchAccount && (
+                <button className="amy-phone-switch" onClick={() => onSwitchAccount(account!)}>
+                  Signed in as {loggedInAs} — switch to {account}
+                </button>
               )}
-            </button>
+            </div>
           );
         })}
-        <button disabled={waitingToPair !== null} onClick={loadDevices}>
-          {t("common.refresh")}
-        </button>
       </div>
+      <button className="amy-ghost-btn" disabled={waitingToPair !== null} onClick={loadDevices}>
+        {t("common.refresh")}
+      </button>
     </>
   );
 };

@@ -1,155 +1,52 @@
-<a href="https://iloader.app">
-  <picture align="left" >
-    <source media="(prefers-color-scheme: dark)" srcset="/iloader.svg">
-    <img align="left" width="90" height="90" src="/iloader-dark.svg">
-  </picture>
-  
-  <div id="user-content-toc">
-    <ul style="list-style: none;">
-      <summary>
-        <h1>iloader</h1>
-      </summary>
-    </ul>
-  </div>
-</a>
+# A.M.Y Loader
 
----
+A.M.Y Loader is the A.M.Y ecosystem's iPhone sideloader for Windows: sign in with an Apple ID, pick a phone, drop in an `.ipa`. It tracks what's installed on each phone with a 7-day countdown, re-signs an app in one tap, and remembers which Apple ID each phone uses.
 
-[![Build iloader](https://img.shields.io/github/actions/workflow/status/nab138/iloader/build.yml?style=flat&logo=github&logoColor=white&label=Build%20iloader)](https://github.com/nab138/iloader/actions/workflows/build.yml) ![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fnab138%2F28258aff7e3f1d3a3084a21f4cff2e57%2Fraw%2Filoader_downloads.json&style=flat)
-[![Sponsor](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/nab138)
+It's a reskin of **[iloader](https://github.com/nab138/iloader) by nab138** (MIT). The Rust engine (Apple sign-in, anisette, signing, installing) is iloader's, unchanged; A.M.Y Loader replaces the interface. **A.M.Y Loader is not affiliated with or endorsed by iloader.**
 
-Install SideStore (or other apps) and import your pairing file with ease
+## What's different from iloader
 
-**This repository and [iloader.app](https://iloader.app) are the only official ways to download iloader. There is also an unofficial [Homebrew cask](https://formulae.brew.sh/cask/iloader), an unofficial [AUR package](https://aur.archlinux.org/packages/iloader-bin), and an unofficial [Fedora COPR repository](https://copr.fedorainfracloud.org/coprs/anudeepd/iloader) maintained by the community. Do not download from any other sources or websites.**
+- A.M.Y holographic theme and layout (matches the A.M.Y hub), fonts bundled locally.
+- **This week** timeline: every app on every phone with its signing countdown, re-sign (↻) and stop-tracking (×) buttons.
+- Phone cards show Wi-Fi/USB, iOS version and the Apple ID that phone usually uses, with a one-tap switch.
+- Drag an `.ipa` anywhere onto the window to install it (`Ctrl+O` to choose one).
+- iloader's SideStore/LiveContainer installers and tools (certificates, App IDs, pairing files, settings, logs) live under **Advanced**.
+- iloader's self-updater is switched off (it would install plain iloader). A.M.Y's own update feed comes with Phase 2.
 
-<img width="1918" height="998" alt="iloader0" src="https://github.com/user-attachments/assets/93cd135d-6d89-46ee-9b9f-12c596806911" />
+## Where data lives (all on this PC)
 
-## How to use
+| Data | Where |
+| --- | --- |
+| Apple ID passwords, certificates, anisette state | Windows Credential Manager, under `iloader` (shared with iloader, so saved logins carry over) |
+| Saved login list, settings | `%APPDATA%\uk.amy.loader\data.json`, `preferences.json` |
+| Install history (timeline) | `%APPDATA%\uk.amy.loader\amy.json` |
+| `.ipa` files | wherever you keep them; A.M.Y Loader stores the path to re-sign later |
 
-- Install usbmuxd for your platform
-  - Windows: [iTunes](https://apple.co/ms)
-  - macOS: Included
-  - Linux: Potentially included, if not, install via your package manager
-- Install the latest version for your platform from the [releases](https://github.com/nab138/iloader/releases)
-  - NixOS: Use the flake `github:nab138/iloader`
-  - Fedora: Use the .RPM or the unofficial [Fedora COPR repository](https://copr.fedorainfracloud.org/coprs/anudeepd/iloader)
-  - Arch: Use the unofficial [AUR package](https://aur.archlinux.org/packages/iloader-bin),
-- Plug in your iDevice to your computer
-- Open the app
-- Sign into your Apple ID
-- Select your action (e.g. install SideStore)
+Nothing is sent anywhere except to Apple (sign-in, signing) and the anisette server chosen in Settings.
 
-## Features
+## Building
 
-- Install SideStore (or LiveContainer + SideStore), import certificate and place rppairing+lockdown pairing files automatically
-- Import any IPA
-- Intelligent error suggestions to help resolve common issues
-- Manage pairing files in apps like StikDebug, SideStore, Protokolle, etc
-- See and revoke development certificates & app ids
+Builds run on GitHub Actions (`.github/workflows/build-windows.yml`): every push to `main` produces an installer artifact, and publishing a release attaches it. Locally:
 
-## Troubleshooting
-
-- If you are unable to solve an issue on your own, copy the full error message and ask on the [idevice Discord server](https://discord.gg/EA6yVgydBz) or [open an issue](https://github.com/nab138/iloader/issues).
-- You can view app logs with the "View Logs." If nothing is showing up, change the log level to "Debug."
-- If those logs aren't helpful, logs with additional are stored in the following locations:
-  - Windows: `%APPDATA%\me.nabdev.iloader\logs`
-  - macOS: `~/Library/Application Support/me.nabdev.iloader/logs`
-  - Linux: `~/.local/share/me.nabdev.iloader/logs/`
-
-## Translating
-
-iloader needs localization! If you speak another language and notice iloader does not support it or has mistakes, please consider contributing.
-
-To update/edit an existing language, make a PR modifying `src/locales/<lang>.json`.
-
-To add a new language, add your language to `src/i18next.ts`, and in `src/locales` copy `en.json` to a new file titled `<langcode>.json` and update the strings.
-
-**i18next.ts:**
-
-```ts
-const languages = [
-  ["en", "English"],
-  ["es", "Español"],
-  // Your language here...
-] as const;
+```sh
+bun i
+bunx tauri build --config src-tauri/amy.conf.json --bundles nsis
 ```
 
-You can also add your name to the translators section of the README.
+## Keeping the engine current
 
-Thank you for translating!
+All A.M.Y-specific files sit apart from iloader's: `src/amy/`, `src-tauri/amy.conf.json` (name, ID, window, icons; layered over iloader's `tauri.conf.json` at build time) and `src-tauri/amy-icons/`. The only iloader files changed are `src/App.tsx`, `src/Device.tsx`, `src/main.tsx` and `index.html`.
 
-## Building from source
+`.github/workflows/sync-upstream.yml` checks iloader every Monday. If iloader's new commits merge cleanly it opens a pull request, and if they don't it opens an issue listing what conflicted. To do it by hand:
 
-1. Install [bun](https://bun.sh) (or [Node.js](https://nodejs.org)) and [Rust](https://www.rust-lang.org/tools/install)
-2. Clone the repository and `cd` into it
-3. Run `bun i` (or `npm i`)
+```sh
+git remote add upstream https://github.com/nab138/iloader.git   # once
+git fetch upstream
+git merge upstream/main
+```
 
-For development with hot reload: `bun tauri dev` (or `npm run tauri dev`)
-Make a production build: `bun tauri build` (or `npm run tauri build`)
+Then update `UPSTREAM_ENGINE_VERSION` in `src/amy/meta.ts`.
 
-## Credits
+## Licence
 
-- Icon made by [Transistor](https://github.com/transistor-exe)
-- UI improved by [StephenDev0](https://github.com/StephenDev0)
-- [idevice](https://github.com/jkcoxson/idevice) by [jkcoxson](https://github.com/jkcoxson) for communicating with iOS devices
-- [isideload](https://github.com/nab138/isideload) for installing apps
-  - [idevice](https://github.com/jkcoxson/idevice) by [jkcoxson](https://github.com/jkcoxson) crate is used to communicate with the device
-  - [apple-codesign-quick](https://github.com/Dadoum/apple-codesign-quick) by [Dadoum](https://github.com/Dadoum) for codesigning and entitlements
-  - [Impactor](https://github.com/claration/Impactor) by [claration](https://github.com/claration) was used as a reference for cryptography operations (converting certs to p12, etc.).
-  - [Sideloader](https://github.com/Dadoum/Sideloader) by [Dadoum](https://github.com/Dadoum) was used as a reference for how apple private developer endpoints work
-- [idevice_pair](https://github.com/jkcoxson/idevice_pair) was used as a reference for pairing file management
-- App made with [tauri](https://tauri.app)
-
-## Translators
-
-Thank you to everyone who has contributed translations! See the [Translating](#translating) section if you would like to contribute as well.
-
-- [By3lish](https://github.com/by3lish): Azerbaijani (az)
-- [TNT-333](https://github.com/TNT-333): German (de)
-- [basketshoe](https://github.com/basketshoe): Italian (it)
-- [baocreata](https://github.com/baocreata): Vietnamese (vt)
-- [IamArayel](https://github.com/IamArayel): French (fr)
-- [kkula9999](https://github.com/kkula9999): Traditional & Simplified Chinese (zh_tw & zh_cn)
-- [sibwaze](https://github.com/sibwaze): Russian (ru)
-- [notmalicik](https://github.com/notmalicik): Română (ro)
-- [mirdukkkkk](https://github.com/mirdukkkkk): Improved Russian (ru)
-- [okinaau](https://github.com/okinaau): Arabic (ar)
-- [ChouChiu](https://github.com/ChouChiu): Cantonese (zh_hk) & Improved Chinese (zh_tw & zh_cn)
-- [marcinmajsc](https://github.com/marcinmajsc): Polish (pl)
-- [ern775](https://github.com/ern775): Turkish (tr)
-- [canpng](https://github.com/canpng): Improved Turkish (tr)
-- [jazoppix](https://github.com/jazoppix): Spanish (es)
-- [eseiker](https://github.com/eseiker): Korean (ko)
-- [seomin0610](https://github.com/seomin0610): Improved Korean (ko)
-- [Ordyan777](https://github.com/Ordyan777): Armenian (am)
-- [kakik0u](https://github.com/kakik0u): Japanese (ja)
-- [lkspodmol](https://github.com/lkspodmol): Czech (cs_cz)
-- [marcusherelammonstyle-cmd](https://github.com/marcusherelammonstyle-cmd): Swedish (sv)
-- [MCI49312](https://github.com/MCI49312): Hungarian (hu)
-- [Kynonim](https://github.com/Kynonim): Indonesian (id)
-- [DD00031](https://github.com/DD00031): Dutch (nl)
-- [Toritan123](https://github.com/Toritan123): Improved Japanese (ja)
-- [marcinmajsc](https://github.com/marcinmajsc): Improved Polish (pl)
-- [dleiferives](https://github.com/dleiferives): Greek (el)
-- [ShadowWLX](https://github.com/ShadowWLX): Improved French (fr)
-- [fkpcomposer](https://github.com/fkpcomposer): Brazilian Portuguese (pt_br)
-- [474FrediFred](https://github.com/474FrediFred): Swiss German (de_ch)
-- [bovae](https://github.com/bovae) & [b1twalker](https://github.com/b1twalker): Ukranian (uk)
-
-## License
-
-Copyright (C) 2026 nab138
-
-The source code of this repository is licensed under the MIT License. See the [LICENSE](/LICENSE) file for the full text.
-
-Branding, logos, media assets, and the name “iloader” are not licensed under the MIT License and are subject to separate restrictions.
-
-You may retain or use branding materials in forks, tutorials, or documentation if you include a clear link to either the official site (https://iloader.app) or the iloader source code repository (https://github.com/nab138/iloader) and do not imply official endorsement. See [LICENSE-BRANDING](/LICENSE-BRANDING) for full details.
-
-## Contributing
-
-Please read our [Contributing](/CONTRIBUTING.md) policy before making a contribution.
-
-## Future Plans
-
-iloader is currently being overhauled, see the [trello board](https://trello.com/b/hAe1LHTj/iloader) for more info!
+iloader's source is MIT (see `LICENSE`, © nab138), and that licence carries over to this fork. iloader's name and logos are covered separately by `LICENSE-BRANDING`; A.M.Y Loader uses its own name and icons. Exo 2 and Share Tech Mono are SIL OFL 1.1 (licences in `src/amy/fonts/`).
