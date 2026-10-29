@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AMY Loader",
-  "version": "1.0.0",
+  "mainBinaryName": "AMY Loader",
+  "version": "1.0.1",
   "identifier": "uk.amy.loader",
   "app": {
     "windows": [
@@ -21,9 +22,11 @@
     }
   },
   "bundle": {
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "createUpdaterArtifacts": false,
-    "shortDescription": "A.M.Y Loader — sideload apps to your iPhones",
+    "shortDescription": "A.M.Y Loader \u2014 sideload apps to your iPhones",
     "copyright": "A.M.Y Loader by Con. Built on iloader by nab138 (MIT).",
     "windows": {
       "nsis": {
