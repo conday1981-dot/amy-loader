@@ -971,11 +971,6 @@ select option {
   gap: 8px;
   flex-wrap: wrap;
 }
-.amy-ar {
-  max-height: 76vh;
-  overflow-y: auto;
-  padding-right: 6px;
-}
 .amy-ar .amy-sublabel {
   margin: 8px 0 0;
 }
