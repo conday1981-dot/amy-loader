@@ -11,6 +11,7 @@ mod secure_storage;
 mod error;
 mod logging;
 mod operation;
+mod amy; // A.M.Y Loader: tray, start with Windows, notifications
 
 use crate::{
     account::{
@@ -32,7 +33,7 @@ use tracing_subscriber::{Layer, Registry, fmt, layer::SubscriberExt, util::Subsc
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    amy::register(tauri::Builder::default())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
@@ -101,6 +102,7 @@ pub fn run() {
             app.manage(DeviceInfoMutex::new(None));
             app.manage(SideloaderMutex::new(None));
             app.manage(PairingCancelToken::new(None));
+            amy::setup(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -126,6 +128,10 @@ pub fn run() {
             force_disable_keyring,
             cancel_pairing,
             has_stored_rppairing,
+            amy::amy_get_background,
+            amy::amy_set_background,
+            amy::amy_show_window,
+            amy::amy_notify,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

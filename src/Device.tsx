@@ -10,7 +10,8 @@ import { AppError } from "./errors";
 export type DeviceInfo = {
   name: string;
   id: number;
-  uuid: string;
+  // The engine sends `udid` (see src-tauri/src/device.rs); iloader's type said `uuid`.
+  udid: string;
   connectionType: "USB" | "Network" | "Unknown";
   version: string;
 };
@@ -30,7 +31,7 @@ export const Device = ({
   /** A.M.Y: report the connected phones up to the shell (timeline lanes). */
   onDevicesChange?: (devices: DeviceInfo[]) => void;
   /** A.M.Y: the Apple ID last used for a phone, if known. */
-  accountFor?: (uuid: string) => string | undefined;
+  accountFor?: (udid: string) => string | undefined;
   loggedInAs?: string | null;
   /** A.M.Y: switch the signed-in Apple ID to the one this phone uses. */
   onSwitchAccount?: (email: string) => void;
@@ -214,12 +215,12 @@ export const Device = ({
         {devices.length === 0 && (
           <div className="amy-phones-empty">
             <strong>{t("device.no_devices_found_period")}</strong>
-            <span>Plug a phone in by cable and unlock it, or connect it to the same Wi-Fi with “Show this iPhone when on Wi-Fi” ticked in iTunes.</span>
+            <span>Plug a phone in by cable and unlock it. For Wi-Fi, pair it once by cable and tick “Sync with this iPhone over Wi-Fi” in iTunes (or “Show this iPhone when on Wi-Fi” in Apple Devices).</span>
           </div>
         )}
         {devices.map((device) => {
           const isActive = selectedDevice?.id === device.id;
-          const account = accountFor?.(device.uuid);
+          const account = accountFor?.(device.udid);
           const mismatch = isActive && account && loggedInAs && account !== loggedInAs;
           return (
             <div key={device.id} className={"amy-phone" + (isActive ? " active" : "")}>

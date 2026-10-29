@@ -1,17 +1,18 @@
 import { useMemo } from "react";
-import { InstallRecord, expiresAt, daysLeftLabel, urgency } from "./history";
+import { InstallRecord, deviceKey, expiresAt, daysLeftLabel, formatWhen, refreshDueAt, urgency } from "./history";
 import type { DeviceInfo } from "../Device";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DAYS = 7;
-/** Phase 2 auto-refresh re-signs this long before expiry. */
-const REFRESH_LEAD_MS = 2 * DAY_MS;
 
 type Props = {
   installs: InstallRecord[];
   connected: DeviceInfo[];
-  selectedUuid: string | null;
+  selectedUdid: string | null;
   busy: boolean;
+  /** Auto-refresh setting: start trying this many days before expiry. */
+  leadDays: number;
+  autoRefreshOn: boolean;
   onResign: (rec: InstallRecord) => void;
   onForget: (rec: InstallRecord) => void;
 };
@@ -22,7 +23,7 @@ function startOfToday(now: Date) {
   return d;
 }
 
-export function Timeline({ installs, connected, selectedUuid, busy, onResign, onForget }: Props) {
+export function Timeline({ installs, connected, selectedUdid, busy, leadDays, autoRefreshOn, onResign, onForget }: Props) {
   const now = new Date();
   const weekStart = startOfToday(now);
   const weekEnd = new Date(weekStart.getTime() + DAYS * DAY_MS);
@@ -47,13 +48,19 @@ export function Timeline({ installs, connected, selectedUuid, busy, onResign, on
 
   // One lane per phone that has installs (plus connected phones with none yet).
   const lanes = useMemo(() => {
-    const map = new Map<string, { uuid: string; name: string; recs: InstallRecord[] }>();
+    type Lane = { key: string; udid: string; name: string; recs: InstallRecord[] };
+    const map = new Map<string, Lane>();
     for (const r of installs) {
-      if (!map.has(r.deviceUuid)) map.set(r.deviceUuid, { uuid: r.deviceUuid, name: r.deviceName, recs: [] });
-      map.get(r.deviceUuid)!.recs.push(r);
+      const key = deviceKey(r);
+      if (!map.has(key)) map.set(key, { key, udid: r.deviceUdid, name: r.deviceName, recs: [] });
+      map.get(key)!.recs.push(r);
     }
     for (const d of connected) {
-      if (!map.has(d.uuid)) map.set(d.uuid, { uuid: d.uuid, name: d.name, recs: [] });
+      if (map.has(d.udid)) continue;
+      // records saved before the phone's UDID was known share its name
+      const byName = map.get(`name:${d.name}`);
+      if (byName && !byName.udid) byName.udid = d.udid;
+      else map.set(d.udid, { key: d.udid, udid: d.udid, name: d.name, recs: [] });
     }
     for (const l of map.values()) l.recs.sort((a, b) => expiresAt(a).getTime() - expiresAt(b).getTime());
     return [...map.values()];
@@ -76,14 +83,14 @@ export function Timeline({ installs, connected, selectedUuid, busy, onResign, on
 
       {lanes.length === 0 && (
         <div className="amy-tl-empty">
-          Nothing tracked yet. Apps you install from A.M.Y Loader appear here with their 7-day countdown.
+          Nothing tracked yet. Apps you install from A.M.Y Loader appear here with their 7-day countdown. Already installed one? Use “Track an installed app”.
         </div>
       )}
 
       {lanes.map((lane) => {
-        const dev = connected.find((d) => d.uuid === lane.uuid);
+        const dev = connected.find((d) => (lane.udid ? d.udid === lane.udid : d.name === lane.name));
         return (
-          <div key={lane.uuid} className={"amy-tl-lane" + (lane.uuid === selectedUuid ? " selected" : "")}>
+          <div key={lane.key} className={"amy-tl-lane" + (lane.udid && lane.udid === selectedUdid ? " selected" : "")}>
             <div className="amy-tl-lane-label">
               <span className="amy-tl-phone">{lane.name}</span>
               <span className={"amy-chip " + (dev ? (dev.connectionType === "Network" ? "wifi" : "usb") : "offline")}>
@@ -101,15 +108,15 @@ export function Timeline({ installs, connected, selectedUuid, busy, onResign, on
                 const end = expiresAt(r).getTime();
                 const left = pct(start);
                 const width = Math.max(pct(end) - left, 6);
-                const refreshAt = end - REFRESH_LEAD_MS;
-                const showDiamond = refreshAt > now.getTime() && refreshAt < weekEnd.getTime();
+                const refreshAt = refreshDueAt(r, leadDays).getTime();
+                const showDiamond = autoRefreshOn && refreshAt > now.getTime() && refreshAt < weekEnd.getTime();
                 const u = urgency(r, now);
                 return (
                   <div
                     key={r.id}
                     className={"amy-tl-bar " + u}
                     style={{ left: `${left}%`, width: `${width}%`, top: `${6 + idx * 34}px` }}
-                    title={`${r.app} — signed ${new Date(r.signedAt).toLocaleString()} with ${r.appleId}, expires ${expiresAt(r).toLocaleString()}`}
+                    title={`${r.app} — signed ${formatWhen(new Date(r.signedAt))} with ${r.appleId}, expires ${formatWhen(expiresAt(r))}${autoRefreshOn ? `; auto-refresh from ${formatWhen(new Date(refreshAt))}` : ""}`}
                   >
                     {showDiamond && (
                       <span
@@ -151,7 +158,7 @@ export function Timeline({ installs, connected, selectedUuid, busy, onResign, on
         <span><i className="amy-legend-sw ok" /> 4+ days</span>
         <span><i className="amy-legend-sw soon" /> 1–3 days</span>
         <span><i className="amy-legend-sw urgent" /> under a day</span>
-        <span><i className="amy-legend-diamond" /> auto-refresh point (Phase 2)</span>
+        <span><i className="amy-legend-diamond" /> {autoRefreshOn ? `auto-refresh starts (${leadDays}d before expiry)` : "auto-refresh is off"}</span>
       </div>
     </div>
   );

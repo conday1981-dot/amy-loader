@@ -1,8 +1,17 @@
 name: Build A.M.Y Loader (Windows)
 
 # Builds the Windows installer on GitHub (the Celeron laptop is far too slow to
-# compile the Rust engine). Every push to main produces a downloadable artifact;
-# publishing a GitHub release also attaches the installer to that release.
+# compile the Rust engine).
+#   - every push to main: installer artifact + rolling "latest" pre-release,
+#     and (once the secrets below exist) the self-update feed on Cloudflare
+#   - publishing a GitHub release also attaches the installer to that release
+#
+# Repository secrets (Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           A.M.Y update-signing key (minisign)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
+#   CLOUDFLARE_API_TOKEN                token with "Edit Cloudflare Workers"
+#   CLOUDFLARE_ACCOUNT_ID               the Cloudflare account ID
+# Without the signing secrets the build still works, but makes no update files.
 on:
   push:
     branches: [main]
@@ -23,6 +32,8 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 60
+    outputs:
+      signed: ${{ steps.build.outputs.signed }}
     steps:
       - uses: actions/checkout@v6
 
@@ -59,18 +70,35 @@ jobs:
         run: bunx rimraf src-tauri/target/release/bundle
 
       - name: Build installer (A.M.Y config layered over iloader's)
-        run: bunx tauri build --config src-tauri/amy.conf.json --bundles nsis
+        id: build
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+            bunx tauri build --config src-tauri/amy.conf.json --bundles nsis
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "signed=true" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "::warning title=No update signing key::TAURI_SIGNING_PRIVATE_KEY is not set, so this build has no update signature and the Cloudflare update feed is not published."
+            bunx tauri build --config src-tauri/amy.conf.json --config src-tauri/amy.nosign.conf.json --bundles nsis
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "signed=false" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: amy-loader-windows
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
           retention-days: 30
 
       # Rolling "latest" pre-release: always holds the newest main build, so the
-      # installer is one stable link (and the future A.M.Y update feed source).
+      # installer is one stable link.
       - name: Publish rolling "latest" pre-release
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         shell: pwsh
@@ -92,3 +120,87 @@ jobs:
         run: |
           $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           gh release upload "${{ github.event.release.tag_name }}" "$($exe.FullName)" --clobber
+
+      # Update feed contents: the signed installer + latest.json, which the app
+      # reads from the endpoint in src-tauri/amy.conf.json.
+      - name: Prepare update feed
+        if: steps.build.outputs.signed == 'true' && github.event_name != 'release'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $sigFile = "$($exe.FullName).sig"
+          if (-not (Test-Path $sigFile)) { throw "Missing update signature $sigFile" }
+          $conf = Get-Content src-tauri/amy.conf.json -Raw | ConvertFrom-Json
+          $version = $conf.version
+          $endpoint = $conf.plugins.updater.endpoints[0]
+          $base = $endpoint.Substring(0, $endpoint.LastIndexOf('/'))
+          $name = "AMY-Loader_${version}_x64-setup.exe"
+          New-Item -ItemType Directory -Force updates/public | Out-Null
+          Copy-Item $exe.FullName "updates/public/$name"
+          $platform = @{ signature = (Get-Content $sigFile -Raw).Trim(); url = "$base/$name" }
+          $feed = [ordered]@{
+            version   = $version
+            notes     = (git log -1 --pretty=%s)
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{ "windows-x86_64-nsis" = $platform; "windows-x86_64" = $platform }
+          }
+          $feed | ConvertTo-Json -Depth 5 | Set-Content updates/public/latest.json -Encoding utf8NoBOM
+          Get-Content updates/public/latest.json
+          Get-ChildItem updates/public
+
+      - name: Upload update feed
+        if: steps.build.outputs.signed == 'true' && github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: amy-loader-update-feed
+          path: updates/public/
+          if-no-files-found: error
+          retention-days: 7
+
+  update-feed:
+    needs: windows
+    if: needs.windows.outputs.signed == 'true' && github.event_name != 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download update feed
+        uses: actions/download-artifact@v4
+        with:
+          name: amy-loader-update-feed
+          path: updates/public
+
+      - name: Check Cloudflare secrets
+        id: cf
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -n "$CF_TOKEN" ] && [ -n "$CF_ACCOUNT" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=No Cloudflare secrets::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not set, so the update feed was not published."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy update feed (Cloudflare Worker)
+        if: steps.cf.outputs.ok == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: updates
+          command: deploy
+
+      - name: Check the live feed
+        if: steps.cf.outputs.ok == 'true'
+        run: |
+          url=$(python3 -c "import json;print(json.load(open('src-tauri/amy.conf.json'))['plugins']['updater']['endpoints'][0])")
+          want=$(python3 -c "import json;print(json.load(open('updates/public/latest.json'))['version'])")
+          for i in 1 2 3 4 5 6; do
+            got=$(curl -fsS "$url?t=$(date +%s)" | python3 -c "import json,sys;print(json.load(sys.stdin)['version'])" || true)
+            if [ "$got" = "$want" ]; then echo "Feed is live at $url with version $got"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::Feed at $url shows '${got}', expected '${want}'"; exit 1

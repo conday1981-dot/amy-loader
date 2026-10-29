@@ -6,6 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { Update } from "@tauri-apps/plugin-updater";
 import {
   sideloadOperation,
   installSideStoreOperation,
@@ -30,18 +32,31 @@ import { useError } from "./ErrorContext";
 import { AmyMark } from "./amy/AmyMark";
 import { Timeline } from "./amy/Timeline";
 import {
+  AmySettings,
+  DEFAULT_SETTINGS,
   InstallRecord,
   appNameFromPath,
+  backfillDeviceIds,
+  expiresAt,
   forgetInstall,
+  formatWhen,
   getAmyData,
+  getSettings,
   recordInstall,
+  refreshDueAt,
 } from "./amy/history";
+import { useAutoRefresh } from "./amy/autorefresh";
+import { AutoRefreshPanel } from "./amy/AutoRefreshPanel";
+import { TrackModal } from "./amy/TrackModal";
+import { checkForAmyUpdate, installAmyUpdate, notifyDesktop, setBackground } from "./amy/native";
 import { UPSTREAM_ENGINE_VERSION, UPSTREAM_URL } from "./amy/meta";
 import "./amy/strings";
 // Loaded last so the A.M.Y theme overrides iloader's component styles.
 import "./amy/amy.css";
 
-type ModalName = null | "certificates" | "appids" | "pairing" | "settings";
+type ModalName = null | "certificates" | "appids" | "pairing" | "settings" | "autorefresh" | "track";
+
+const UPDATE_CHECK_EVERY_MS = 12 * 60 * 60 * 1000;
 
 function App() {
   const { t } = useTranslation();
@@ -58,6 +73,8 @@ function App() {
   const [dragOver, setDragOver] = useState(false);
   const [version, setVersion] = useState<string>("");
   const [anisetteServer] = useStore<string>("anisetteServer3-1", "mac-ani.jkcoxson.com");
+  const [amySettings, setAmySettings] = useState<AmySettings>(DEFAULT_SETTINGS);
+  const [updateState, setUpdateState] = useState<string>("Not checked yet");
 
   const refreshDevicesRef = useRef<(() => void) | null>(null);
   const [noKeyringAvailable, setNoKeyringAvailable] = useState<boolean>(false);
@@ -79,8 +96,18 @@ function App() {
 
   useEffect(() => {
     // iloader's checkForUpdates() is deliberately not called: it pulls nab138's
-    // builds, which would replace A.M.Y Loader. A.M.Y's own update feed comes later.
+    // builds, which would replace A.M.Y Loader. A.M.Y's own feed is used below.
     getVersion().then(setVersion).catch(() => {});
+  }, []);
+
+  // Load A.M.Y settings and make "start with Windows / close to tray" match them.
+  useEffect(() => {
+    getSettings()
+      .then(async (s) => {
+        setAmySettings(s);
+        await setBackground(s.background).catch((e) => console.error("Unable to apply background setting", e));
+      })
+      .catch((e) => console.error("Unable to load A.M.Y settings", e));
   }, []);
 
   const reloadHistory = useCallback(async () => {
@@ -99,6 +126,28 @@ function App() {
     const id = setInterval(() => setInstalls((v) => [...v]), 60_000);
     return () => clearInterval(id);
   }, [reloadHistory]);
+
+  const handleDevices = useCallback(
+    (devices: DeviceInfo[]) => {
+      setConnected(devices);
+      backfillDeviceIds(devices)
+        .then((changed) => {
+          if (changed) reloadHistory();
+        })
+        .catch(() => {});
+    },
+    [reloadHistory],
+  );
+
+  const auto = useAutoRefresh({
+    loggedInAs,
+    setLoggedInAs,
+    setSelectedDevice,
+    manualBusy: operationState !== null,
+    anisetteServer,
+    onHistoryChanged: reloadHistory,
+    onDevices: handleDevices,
+  });
 
   const shortcutLabel = useCallback(
     (mac: string, windows: string, linux?: string) => {
@@ -157,6 +206,10 @@ function App() {
   /** Install (or re-sign) one .ipa on the selected phone and record it. */
   const installIpa = useCallback(
     async (path: string) => {
+      if (auto.status.running) {
+        toast.error("Auto-refresh is working. Try again in a moment.");
+        return;
+      }
       if (!ensuredLoggedIn() || !ensureSelectedDevice()) return;
       const device = selectedDevice!;
       const appleId = loggedInAs!;
@@ -165,7 +218,7 @@ function App() {
         await recordInstall({
           app: appNameFromPath(path),
           ipaPath: path,
-          deviceUuid: device.uuid,
+          deviceUdid: device.udid,
           deviceName: device.name,
           appleId,
         });
@@ -175,7 +228,7 @@ function App() {
         console.error(e?.message ?? e);
       }
     },
-    [ensuredLoggedIn, ensureSelectedDevice, selectedDevice, loggedInAs, startOperation, reloadHistory],
+    [ensuredLoggedIn, ensureSelectedDevice, selectedDevice, loggedInAs, startOperation, reloadHistory, auto.status.running],
   );
 
   const chooseIpa = useCallback(async () => {
@@ -206,7 +259,8 @@ function App() {
 
   const resign = useCallback(
     (rec: InstallRecord) => {
-      if (!selectedDevice || selectedDevice.uuid !== rec.deviceUuid) {
+      const samePhone = rec.deviceUdid ? selectedDevice?.udid === rec.deviceUdid : selectedDevice?.name === rec.deviceName;
+      if (!selectedDevice || !samePhone) {
         toast.error(`Select ${rec.deviceName} in Phones first`);
         return;
       }
@@ -247,7 +301,7 @@ function App() {
             toast.error("That isn't an .ipa file");
             return;
           }
-          if (p.paths.length > 1) toast.message("Installing the first .ipa — drop one at a time");
+          if (p.paths.length > 1) toast.info("Installing the first .ipa — drop one at a time");
           installIpaRef.current(ipa);
         }
       })
@@ -294,7 +348,75 @@ function App() {
     });
   };
 
-  const busy = operationState !== null;
+  const busy = operationState !== null || auto.status.running;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+
+  // ── A.M.Y self-update ─────────────────────────────────────────────────────
+  const installUpdate = useCallback(async (u: Update) => {
+    if (busyRef.current) {
+      toast.error("Wait for the current install or refresh to finish, then update.");
+      return;
+    }
+    const p = installAmyUpdate(u, (pct) => setUpdateState(pct === null ? `Downloading ${u.version}…` : `Downloading ${u.version}: ${pct}%`));
+    toast.promise(p, {
+      loading: `Updating to ${u.version}…`,
+      success: "Installed. Restarting…",
+      error: (e) => `Update failed: ${String(e)}`,
+    });
+    p.catch((e) => setUpdateState(`Update failed: ${String(e)}`));
+  }, []);
+
+  const checkUpdate = useCallback(
+    async (interactive: boolean) => {
+      setUpdateState("Checking…");
+      try {
+        const u = await checkForAmyUpdate();
+        if (!u) {
+          setUpdateState(`Up to date (checked ${formatWhen(new Date())})`);
+          if (interactive) toast.success("A.M.Y Loader is up to date");
+          return;
+        }
+        setUpdateState(`Version ${u.version} is available`);
+        const visible = await getCurrentWindow()
+          .isVisible()
+          .catch(() => true);
+        if (!interactive && !visible && !busyRef.current) {
+          // Running hidden in the tray: nobody to ask, so update quietly.
+          await notifyDesktop("Updating A.M.Y Loader", `Installing version ${u.version}. It restarts by itself.`);
+          await installUpdate(u);
+          return;
+        }
+        toast(`A.M.Y Loader ${u.version} is ready`, {
+          duration: Infinity,
+          action: { label: "Install & restart", onClick: () => installUpdate(u) },
+        });
+      } catch (e) {
+        setUpdateState(`Update check failed: ${String(e)}`);
+        if (interactive) toast.error(`Update check failed: ${String(e)}`);
+      }
+    },
+    [installUpdate],
+  );
+
+  useEffect(() => {
+    if (!amySettings.checkUpdates) return;
+    const first = setTimeout(() => checkUpdate(false), 20_000);
+    const every = setInterval(() => checkUpdate(false), UPDATE_CHECK_EVERY_MS);
+    return () => {
+      clearTimeout(first);
+      clearInterval(every);
+    };
+  }, [amySettings.checkUpdates, checkUpdate]);
+
+  const nextRefresh = (() => {
+    const upcoming = installs
+      .map((r) => ({ r, at: refreshDueAt(r, amySettings.leadDays) }))
+      .sort((a, b) => a.at.getTime() - b.at.getTime())[0];
+    if (!upcoming) return null;
+    const dueNow = upcoming.at.getTime() <= Date.now();
+    return `${upcoming.r.app} on ${upcoming.r.deviceName} ${dueNow ? `is due (expires ${formatWhen(expiresAt(upcoming.r))})` : `from ${formatWhen(upcoming.at)}`}`;
+  })();
   const targetLine =
     selectedDevice && loggedInAs
       ? `Installs to ${selectedDevice.name} with ${loggedInAs}`
@@ -346,6 +468,12 @@ function App() {
                 <button className="amy-list-btn" onClick={() => runInstaller(installLiveContainerOperation, false, true)}>{t("app.livecontainer_sidestore_stable")}</button>
                 <button className="amy-list-btn" onClick={() => runInstaller(installLiveContainerOperation, true, true)}>{t("app.livecontainer_sidestore_nightly")}</button>
                 <p className="amy-sublabel">Tools</p>
+                <button className="amy-list-btn" onClick={() => setOpenModal("autorefresh")}>
+                  Auto-refresh, alerts &amp; updates
+                </button>
+                <button className="amy-list-btn" onClick={() => setOpenModal("track")}>
+                  Track an installed app
+                </button>
                 <button className="amy-list-btn" onClick={() => { if (ensuredLoggedIn()) setOpenModal("certificates"); }}>
                   {t("app.certificates")} <span aria-hidden="true">{shortcutLabel("⌘⇧C", "Ctrl+Shift+C")}</span>
                 </button>
@@ -382,8 +510,8 @@ function App() {
                 registerRefresh={(fn) => {
                   refreshDevicesRef.current = fn ?? null;
                 }}
-                onDevicesChange={setConnected}
-                accountFor={(uuid) => deviceAccounts[uuid]}
+                onDevicesChange={handleDevices}
+                accountFor={(udid) => deviceAccounts[udid]}
                 loggedInAs={loggedInAs}
                 onSwitchAccount={switchAccount}
               />
@@ -393,14 +521,21 @@ function App() {
           <section className="amy-section">
             <div className="amy-section-head">
               <p className="amy-label">THIS WEEK</p>
-              <span className="amy-hint">Bars show how long each app stays signed · ↻ re-signs it now</span>
+              <span className="amy-hint">
+                Bars show how long each app stays signed · ↻ re-signs it now ·{" "}
+                <button className="amy-link-btn" onClick={() => setOpenModal("track")}>
+                  Track an installed app
+                </button>
+              </span>
             </div>
             <div className="amy-panel">
               <Timeline
                 installs={installs}
                 connected={connected}
-                selectedUuid={selectedDevice?.uuid ?? null}
+                selectedUdid={selectedDevice?.udid ?? null}
                 busy={busy}
+                leadDays={amySettings.leadDays}
+                autoRefreshOn={amySettings.autoRefresh}
                 onResign={resign}
                 onForget={forget}
               />
@@ -421,11 +556,20 @@ function App() {
             </button>
           </section>
 
-          <section className="amy-phase2">
-            <span className="amy-phase2-tag">AUTO-REFRESH</span>
-            <span>Re-signs your apps over home Wi-Fi about 2 days before they expire. Coming in Phase 2.</span>
-            <span className="amy-toggle off" aria-hidden="true"><i /></span>
-          </section>
+          <button className={"amy-phase2" + (amySettings.autoRefresh ? " on" : "")} onClick={() => setOpenModal("autorefresh")}>
+            <span className="amy-phase2-tag">AUTO-REFRESH {amySettings.autoRefresh ? "ON" : "OFF"}</span>
+            <span className="amy-phase2-text">
+              {auto.status.running
+                ? auto.status.step ?? "Working…"
+                : !amySettings.autoRefresh
+                  ? "Apps won't be re-signed automatically. Click to turn it on."
+                  : nextRefresh
+                    ? `Next: ${nextRefresh}`
+                    : "Nothing tracked yet. Install an app here, or track one you've already installed."}
+            </span>
+            <span className={"amy-dot" + (auto.status.running ? " busy" : "")} aria-hidden="true" />
+            <span className="amy-phase2-more">Settings ›</span>
+          </button>
 
           {operationState && <OperationView operationState={operationState} closeMenu={() => setOperationState(null)} />}
         </section>
@@ -439,6 +583,29 @@ function App() {
       </Modal>
       <Modal isOpen={openModal === "pairing"} close={() => setOpenModal(null)}>
         <Pairing />
+      </Modal>
+      <Modal isOpen={openModal === "autorefresh"} close={() => setOpenModal(null)}>
+        <AutoRefreshPanel
+          installs={installs}
+          status={auto.status}
+          runPass={auto.runPass}
+          onSettingsChange={setAmySettings}
+          version={version}
+          updateState={updateState}
+          onCheckUpdate={() => checkUpdate(true)}
+        />
+      </Modal>
+      <Modal isOpen={openModal === "track"} close={() => setOpenModal(null)}>
+        <TrackModal
+          connected={connected}
+          installs={installs}
+          loggedInAs={loggedInAs}
+          deviceAccounts={deviceAccounts}
+          onDone={() => {
+            setOpenModal(null);
+            reloadHistory();
+          }}
+        />
       </Modal>
       <Modal isOpen={openModal === "settings"} close={() => setOpenModal(null)}>
         <h2 style={{ marginTop: 0 }}>{t("app.settings")}</h2>

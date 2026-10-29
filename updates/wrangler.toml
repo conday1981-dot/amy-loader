@@ -1,0 +1,9 @@
+# A.M.Y Loader update feed: a static-assets-only Cloudflare Worker.
+# CI (.github/workflows/build-windows.yml) fills ./public with the newest
+# signed installer and latest.json, then deploys it. Nothing else runs here.
+name = "amy-loader-updates"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[assets]
+directory = "./public"

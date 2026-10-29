@@ -1,6 +1,6 @@
 # A.M.Y Loader
 
-A.M.Y Loader is the A.M.Y ecosystem's iPhone sideloader for Windows: sign in with an Apple ID, pick a phone, drop in an `.ipa`. It tracks what's installed on each phone with a 7-day countdown, re-signs an app in one tap, and remembers which Apple ID each phone uses.
+A.M.Y Loader is the A.M.Y ecosystem's iPhone sideloader for Windows: sign in with an Apple ID, pick a phone, drop in an `.ipa`. It tracks what's installed on each phone with a 7-day countdown, remembers which Apple ID each phone uses, and **re-signs apps automatically over home Wi-Fi before they expire**, so the weekly reinstall goes away. It updates itself from A.M.Y's own signed feed.
 
 It's a reskin of **[iloader](https://github.com/nab138/iloader) by nab138** (MIT). The Rust engine (Apple sign-in, anisette, signing, installing) is iloader's, unchanged; A.M.Y Loader replaces the interface. **A.M.Y Loader is not affiliated with or endorsed by iloader.**
 
@@ -11,7 +11,11 @@ It's a reskin of **[iloader](https://github.com/nab138/iloader) by nab138** (MIT
 - Phone cards show Wi-Fi/USB, iOS version and the Apple ID that phone usually uses, with a one-tap switch.
 - Drag an `.ipa` anywhere onto the window to install it (`Ctrl+O` to choose one).
 - iloader's SideStore/LiveContainer installers and tools (certificates, App IDs, pairing files, settings, logs) live under **Advanced**.
-- iloader's self-updater is switched off (it would install plain iloader). A.M.Y's own update feed comes with Phase 2.
+- **Auto-refresh**: every 5 minutes it looks for apps within 2 days (adjustable) of expiring and, for each phone it can reach over Wi-Fi or USB, signs in with that app's Apple ID and re-installs the same `.ipa`. Failures back off; if a phone stays unreachable as expiry gets close, it says so.
+- **Runs in the background**: starts with Windows hidden in the tray; closing the window keeps it running (tray menu: Open / Refresh apps now / Quit). One copy at a time.
+- **Phone alerts** through [ntfy](https://ntfy.sh) (optional): refreshed, couldn't refresh, connect your phone, Apple wants a 2FA code. Alerts name the app and phone, never the Apple ID.
+- **Track an installed app**: add an app that's already on a phone (from iloader, Sideloadly…) without reinstalling it.
+- **Self-update** from A.M.Y's feed on Cloudflare, signed with A.M.Y's key (iloader's updater, which would install plain iloader, stays off).
 
 ## Where data lives (all on this PC)
 
@@ -19,10 +23,22 @@ It's a reskin of **[iloader](https://github.com/nab138/iloader) by nab138** (MIT
 | --- | --- |
 | Apple ID passwords, certificates, anisette state | Windows Credential Manager, under `iloader` (shared with iloader, so saved logins carry over) |
 | Saved login list, settings | `%APPDATA%\uk.amy.loader\data.json`, `preferences.json` |
-| Install history (timeline) | `%APPDATA%\uk.amy.loader\amy.json` |
+| Install history, auto-refresh settings, activity log | `%APPDATA%\uk.amy.loader\amy.json` |
+| Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `AMY Loader` (only while "Run in the background" is on) |
 | `.ipa` files | wherever you keep them; A.M.Y Loader stores the path to re-sign later |
 
-Nothing is sent anywhere except to Apple (sign-in, signing) and the anisette server chosen in Settings.
+Nothing is sent anywhere except to Apple (sign-in, signing), the anisette server chosen in Settings, the ntfy server if phone alerts are on, and the update feed (a version check).
+
+## Auto-refresh: what it needs
+
+- The laptop on, A.M.Y Loader running (it starts with Windows), and the phone on the same Wi-Fi.
+- Each phone paired for Wi-Fi once: plug it in by cable, open iTunes (or Apple Devices), and tick **Sync with this iPhone over Wi-Fi**.
+- iPhones only stay visible over Wi-Fi while awake or charging, so starting 2 days early gives many chances; leaving a phone on charge overnight is the most reliable.
+- The `.ipa` kept where it was installed from, and the Apple ID saved in A.M.Y Loader.
+
+## Update feed
+
+CI publishes each signed build of `main` to a static Cloudflare Worker (`updates/wrangler.toml`): the installer plus `latest.json`, at the endpoint in `src-tauri/amy.conf.json`. The app only installs an update whose signature matches the public key in that file. Bump `version` in `src-tauri/amy.conf.json` to release; the same version is never offered twice. The repository needs four Actions secrets: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `CLOUDFLARE_API_TOKEN` (Edit Cloudflare Workers) and `CLOUDFLARE_ACCOUNT_ID`. Without the signing pair the build still works but publishes no update.
 
 ## Building
 
@@ -35,9 +51,9 @@ bunx tauri build --config src-tauri/amy.conf.json --bundles nsis
 
 ## Keeping the engine current
 
-All A.M.Y-specific files sit apart from iloader's: `src/amy/`, `src-tauri/amy.conf.json` (name, ID, window, icons; layered over iloader's `tauri.conf.json` at build time) and `src-tauri/amy-icons/`. The only iloader files changed are `src/App.tsx`, `src/Device.tsx`, `src/main.tsx` and `index.html`.
+All A.M.Y-specific files sit apart from iloader's: `src/amy/`, `src-tauri/src/amy.rs` (tray, start with Windows, notifications), `src-tauri/amy.conf.json` (name, ID, window, icons, update feed; layered over iloader's `tauri.conf.json` at build time), `src-tauri/amy-icons/` and `updates/`. The iloader files changed are `src/App.tsx`, `src/Device.tsx`, `src/main.tsx` and `index.html`, plus a few lines in `src-tauri/src/lib.rs` and `src-tauri/Cargo.toml` (three plugins, pinned to versions that match iloader's Tauri version) and `Cargo.lock`.
 
-`.github/workflows/sync-upstream.yml` checks iloader every Monday. If iloader's new commits merge cleanly it opens a pull request, and if they don't it opens an issue listing what conflicted. To do it by hand:
+`.github/workflows/sync-upstream.yml` checks iloader every Monday. If iloader's new commits merge cleanly (a `Cargo.lock` conflict is settled automatically) it opens a pull request, and if they don't it opens an issue listing what conflicted. To do it by hand:
 
 ```sh
 git remote add upstream https://github.com/nab138/iloader.git   # once

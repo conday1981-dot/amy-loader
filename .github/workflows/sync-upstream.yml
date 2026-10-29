@@ -5,8 +5,9 @@ name: Check for iloader engine updates
 # sideloading working, so they need pulling in promptly.
 #   - merges cleanly  -> opens a pull request to review and merge
 #   - needs a human   -> opens an issue explaining what conflicted
-# A.M.Y keeps its branding in its own files (src/amy/, src-tauri/amy.conf.json,
-# src-tauri/amy-icons/), so most engine updates merge without conflicts.
+# A.M.Y keeps its additions in its own files (src/amy/, src-tauri/src/amy.rs,
+# src-tauri/amy.conf.json, src-tauri/amy-icons/, updates/), so most engine
+# updates merge without conflicts; Cargo.lock conflicts are settled below.
 on:
   schedule:
     - cron: "17 7 * * 1"
@@ -61,6 +62,13 @@ jobs:
             done
             if git diff --name-only --diff-filter=U | grep -qx "README.md"; then
               git checkout --ours README.md && git add README.md
+            fi
+            # Cargo.lock: take iloader's, then let cargo add A.M.Y's three
+            # plugins back (resolving only what's missing, upgrading nothing).
+            if git diff --name-only --diff-filter=U | grep -qx "src-tauri/Cargo.lock" \
+               && ! git diff --name-only --diff-filter=U | grep -qx "src-tauri/Cargo.toml"; then
+              git checkout --theirs src-tauri/Cargo.lock
+              (cd src-tauri && cargo metadata --format-version 1 > /dev/null) && git add src-tauri/Cargo.lock
             fi
             remaining=$(git diff --name-only --diff-filter=U)
             if [ -n "$remaining" ]; then
