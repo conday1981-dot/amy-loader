@@ -44,6 +44,8 @@ rootcause = "0.12.1"
 thiserror = "2.0.18"
 strum = {version = "0.28.0", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
+# A.M.Y Loader: read .ipa files for the app library (inflate only)
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

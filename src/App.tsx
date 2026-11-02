@@ -9,7 +9,6 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Update } from "@tauri-apps/plugin-updater";
 import {
-  sideloadOperation,
   installSideStoreOperation,
   installLiveContainerOperation,
   Operation,
@@ -35,16 +34,23 @@ import {
   AmySettings,
   DEFAULT_SETTINGS,
   InstallRecord,
-  appNameFromPath,
   backfillDeviceIds,
   expiresAt,
   forgetInstall,
+  appendLog,
   formatWhen,
   getAmyData,
   getSettings,
   recordInstall,
   refreshDueAt,
+  retargetInstalls,
 } from "./amy/history";
+import type { AppError } from "./errors";
+import { InstallDock } from "./amy/InstallProgress";
+import { startProgressListener } from "./amy/progress";
+import { installWithProgress } from "./amy/installer";
+import { LibraryPanel } from "./amy/LibraryPanel";
+import { CheckResult, LibraryApp, checkLibrary, importToLibrary, listLibrary } from "./amy/library";
 import { useAutoRefresh } from "./amy/autorefresh";
 import { AutoRefreshPanel } from "./amy/AutoRefreshPanel";
 import { TrackModal } from "./amy/TrackModal";
@@ -57,6 +63,15 @@ import "./amy/amy.css";
 type ModalName = null | "certificates" | "appids" | "pairing" | "settings" | "autorefresh" | "track";
 
 const UPDATE_CHECK_EVERY_MS = 12 * 60 * 60 * 1000;
+/** How often the library looks for new app versions. */
+const LIBRARY_CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
+
+/** Shown only when an install fails, so iloader's error screen and suggestions still appear. */
+const amySideloadOperation: Operation = {
+  id: "amy_sideload",
+  titleKey: "operations.sideload_title",
+  steps: [{ id: "install", titleKey: "operations.sideload_step_install" }],
+};
 
 function App() {
   const { t } = useTranslation();
@@ -75,6 +90,9 @@ function App() {
   const [anisetteServer] = useStore<string>("anisetteServer3-1", "mac-ani.jkcoxson.com");
   const [amySettings, setAmySettings] = useState<AmySettings>(DEFAULT_SETTINGS);
   const [updateState, setUpdateState] = useState<string>("Not checked yet");
+  const [library, setLibrary] = useState<LibraryApp[]>([]);
+  const [libraryChecking, setLibraryChecking] = useState(false);
+  const [manualInstalling, setManualInstalling] = useState(false);
 
   const refreshDevicesRef = useRef<(() => void) | null>(null);
   const [noKeyringAvailable, setNoKeyringAvailable] = useState<boolean>(false);
@@ -93,6 +111,22 @@ function App() {
   useEffect(() => {
     checkKeyring();
   }, [checkKeyring]);
+
+  useEffect(() => {
+    startProgressListener();
+  }, []);
+
+  const reloadLibrary = useCallback(async () => {
+    try {
+      setLibrary(await listLibrary());
+    } catch (e) {
+      console.error("Unable to load the app library", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    reloadLibrary();
+  }, [reloadLibrary]);
 
   useEffect(() => {
     // iloader's checkForUpdates() is deliberately not called: it pulls nab138's
@@ -143,7 +177,7 @@ function App() {
     loggedInAs,
     setLoggedInAs,
     setSelectedDevice,
-    manualBusy: operationState !== null,
+    manualBusy: operationState !== null || manualInstalling,
     anisetteServer,
     onHistoryChanged: reloadHistory,
     onDevices: handleDevices,
@@ -203,43 +237,86 @@ function App() {
     return false;
   }, [selectedDevice, t]);
 
-  /** Install (or re-sign) one .ipa on the selected phone and record it. */
+  /** Install (or re-sign) one .ipa on the selected phone, with live progress, and record it. */
   const installIpa = useCallback(
     async (path: string) => {
       if (auto.status.running) {
         toast.error("Auto-refresh is working. Try again in a moment.");
         return;
       }
+      if (manualInstalling) {
+        toast.error("An install is already running.");
+        return;
+      }
       if (!ensuredLoggedIn() || !ensureSelectedDevice()) return;
       const device = selectedDevice!;
       const appleId = loggedInAs!;
+      setManualInstalling(true);
       try {
-        await startOperation(sideloadOperation, { appPath: path });
+        const { info, appName } = await installWithProgress(path, device, "install");
         await recordInstall({
-          app: appNameFromPath(path),
+          app: appName,
           ipaPath: path,
           deviceUdid: device.udid,
           deviceName: device.name,
           appleId,
+          bundleId: info?.bundleId,
+          version: info?.version,
         });
         await reloadHistory();
-      } catch (e: any) {
-        console.log(e?.type);
-        console.error(e?.message ?? e);
+        toast.success(`${appName}${info ? ` ${info.version}` : ""} installed on ${device.name}`);
+      } catch (e) {
+        // Show iloader's error screen (with its suggestions) for the failure.
+        setOperationState({
+          current: amySideloadOperation,
+          started: ["install"],
+          completed: [],
+          failed: [{ stepId: "install", extraDetails: e as AppError }],
+        });
+      } finally {
+        setManualInstalling(false);
       }
     },
-    [ensuredLoggedIn, ensureSelectedDevice, selectedDevice, loggedInAs, startOperation, reloadHistory, auto.status.running],
+    [ensuredLoggedIn, ensureSelectedDevice, selectedDevice, loggedInAs, reloadHistory, auto.status.running, manualInstalling],
+  );
+
+  /**
+   * Save an .ipa (or a .zip with an .ipa inside, e.g. a GitHub build artifact)
+   * into the library, then install that copy if a phone and Apple ID are ready.
+   */
+  const addIpa = useCallback(
+    async (path: string) => {
+      const id = toast.loading("Saving to the A.M.Y library…");
+      let saved;
+      try {
+        saved = await importToLibrary(path);
+      } catch (e) {
+        toast.error(`Couldn't add that file: ${String(e)}`, { id });
+        return;
+      }
+      const { app, version } = saved;
+      // Records that used the original file now use the library copy.
+      await retargetInstalls(app.bundleId, [path], version.path).catch(() => []);
+      await reloadLibrary();
+      await reloadHistory();
+      if (loggedInAs && selectedDevice) {
+        toast.success(`${app.name} ${version.version} saved — installing on ${selectedDevice.name}`, { id });
+        installIpa(version.path);
+      } else {
+        toast.success(`${app.name} ${version.version} saved to the library. Choose a phone and Apple ID, then press Install.`, { id });
+      }
+    },
+    [installIpa, loggedInAs, selectedDevice, reloadLibrary, reloadHistory],
   );
 
   const chooseIpa = useCallback(async () => {
-    if (!ensuredLoggedIn() || !ensureSelectedDevice()) return;
     const path = await openFileDialog({
       multiple: false,
-      filters: [{ name: t("app.ipa_files"), extensions: ["ipa"] }],
+      filters: [{ name: "Apps (.ipa, or .zip containing an .ipa)", extensions: ["ipa", "zip"] }],
     });
     if (!path) return;
-    installIpa(path as string);
-  }, [ensuredLoggedIn, ensureSelectedDevice, installIpa, t]);
+    addIpa(path as string);
+  }, [addIpa]);
 
   const switchAccount = useCallback(
     (email: string) => {
@@ -285,8 +362,8 @@ function App() {
   );
 
   // Drag an .ipa anywhere onto the window to install it.
-  const installIpaRef = useRef(installIpa);
-  installIpaRef.current = installIpa;
+  const addIpaRef = useRef(addIpa);
+  addIpaRef.current = addIpa;
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     getCurrentWebview()
@@ -296,13 +373,17 @@ function App() {
         else if (p.type === "leave") setDragOver(false);
         else if (p.type === "drop") {
           setDragOver(false);
-          const ipa = p.paths.find((x) => /\.ipa$/i.test(x));
-          if (!ipa) {
-            toast.error("That isn't an .ipa file");
+          const files = p.paths.filter((x) => /\.(ipa|zip)$/i.test(x));
+          if (files.length === 0) {
+            toast.error(
+              p.paths.length === 0
+                ? "Nothing arrived. If you dragged from inside a zip in Explorer, drop the .zip itself instead."
+                : "That isn't an .ipa (or a .zip containing one)",
+            );
             return;
           }
-          if (p.paths.length > 1) toast.info("Installing the first .ipa — drop one at a time");
-          installIpaRef.current(ipa);
+          if (files.length > 1) toast.info("Adding the first file — drop one at a time");
+          addIpaRef.current(files[0]);
         }
       })
       .then((fn) => (unlisten = fn))
@@ -348,9 +429,99 @@ function App() {
     });
   };
 
-  const busy = operationState !== null || auto.status.running;
+  const busy = operationState !== null || auto.status.running || manualInstalling;
   const busyRef = useRef(busy);
   busyRef.current = busy;
+
+  // ── library updates ──────────────────────────────────────────────────────
+  const autoRef = useRef(auto);
+  autoRef.current = auto;
+  const libraryRef = useRef(library);
+  libraryRef.current = library;
+  const libraryCheckingRef = useRef(false);
+
+  const runLibraryCheck = useCallback(
+    async (bundleId?: string, interactive = false) => {
+      if (libraryCheckingRef.current) return;
+      libraryCheckingRef.current = true;
+      setLibraryChecking(true);
+      const before = libraryRef.current;
+      try {
+        let results: CheckResult[];
+        try {
+          results = await checkLibrary(bundleId);
+        } catch (e) {
+          if (interactive) toast.error(`Update check failed: ${String(e)}`);
+          return;
+        }
+        await reloadLibrary();
+        for (const r of results.filter((x) => x.status === "updated" && x.path)) {
+          const prev = before.find((a) => a.bundleId === r.bundleId);
+          // Re-signs always use the newest library copy from now on.
+          const changed = await retargetInstalls(r.bundleId, prev?.versions.map((v) => v.path) ?? [], r.path!);
+          await reloadHistory();
+          const phones = [...new Set(changed.map((c) => c.deviceName))];
+          await appendLog("ok", `${r.message}.${phones.length ? ` On ${phones.join(", ")}.` : ""}`);
+          if (changed.length && prev?.autoInstall) {
+            await notifyDesktop(`${r.name} ${r.version ?? ""} downloaded`, `Installing it on ${phones.join(", ")}.`);
+            const res = await autoRef.current.runPass("update", changed.map((c) => c.id));
+            if (res.refreshed === 0) {
+              await appendLog("info", `${r.name}: ${res.message} It will go on at the next re-sign.`);
+            }
+          } else {
+            await notifyDesktop(
+              `${r.name} ${r.version ?? ""} downloaded`,
+              changed.length ? "Open A.M.Y Loader to install it now, or it goes on at the next re-sign." : "Saved to the library.",
+            );
+            if (changed.length) {
+              toast(`${r.name} ${r.version ?? ""} is ready`, {
+                duration: Infinity,
+                action: {
+                  label: "Install now",
+                  onClick: () => {
+                    autoRef.current.runPass("update", changed.map((c) => c.id)).then((res) => toast(res.message));
+                  },
+                },
+              });
+            }
+          }
+        }
+        if (interactive) {
+          const errors = results.filter((x) => x.status === "error");
+          const updated = results.filter((x) => x.status === "updated").length;
+          if (errors.length) errors.forEach((x) => toast.error(`${x.name}: ${x.message}`));
+          else if (updated === 0) toast.success(results.length === 1 ? results[0].message : "Everything is up to date");
+        }
+      } finally {
+        libraryCheckingRef.current = false;
+        setLibraryChecking(false);
+      }
+    },
+    [reloadLibrary, reloadHistory],
+  );
+
+  useEffect(() => {
+    const run = () => {
+      if (libraryRef.current.some((a) => a.source)) runLibraryCheck(undefined, false);
+    };
+    const first = setTimeout(run, 90_000);
+    const every = setInterval(run, LIBRARY_CHECK_EVERY_MS);
+    return () => {
+      clearTimeout(first);
+      clearInterval(every);
+    };
+  }, [runLibraryCheck]);
+
+  const installedOn = useCallback(
+    (app: LibraryApp) => [
+      ...new Set(
+        installs
+          .filter((r) => r.bundleId === app.bundleId || app.versions.some((v) => v.path === r.ipaPath))
+          .map((r) => r.deviceName),
+      ),
+    ],
+    [installs],
+  );
 
   // ── A.M.Y self-update ─────────────────────────────────────────────────────
   const installUpdate = useCallback(async (u: Update) => {
@@ -542,17 +713,36 @@ function App() {
             </div>
           </section>
 
+          <section className="amy-section">
+            <div className="amy-section-head">
+              <p className="amy-label">LIBRARY</p>
+              <span className="amy-hint">Saved copies of your apps · A.M.Y checks their update sources every 6 hours</span>
+            </div>
+            <div className="amy-panel">
+              <LibraryPanel
+                apps={library}
+                busy={busy}
+                checking={libraryChecking}
+                installedOn={installedOn}
+                onInstall={(app) => installIpa(app.versions[0].path)}
+                onCheck={(id) => runLibraryCheck(id, true)}
+                onChanged={reloadLibrary}
+                onImport={chooseIpa}
+              />
+            </div>
+          </section>
+
           <section className={"amy-drop" + (dragOver ? " active" : "")}>
             <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
               <path d="M12 16V4M7 9l5-5 5 5" />
               <path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3" />
             </svg>
             <div className="amy-drop-text">
-              <strong>{dragOver ? "Release to install" : "Drop an .ipa anywhere on this window"}</strong>
+              <strong>{dragOver ? "Release to add" : "Drop an .ipa (or a .zip with one inside) anywhere on this window"}</strong>
               <span>{targetLine}</span>
             </div>
             <button className="amy-primary-btn" onClick={chooseIpa} disabled={busy}>
-              Choose .ipa <span aria-hidden="true">{shortcutLabel("⌘O", "Ctrl+O")}</span>
+              Choose file <span aria-hidden="true">{shortcutLabel("⌘O", "Ctrl+O")}</span>
             </button>
           </section>
 
@@ -572,6 +762,7 @@ function App() {
           </button>
 
           {operationState && <OperationView operationState={operationState} closeMenu={() => setOperationState(null)} />}
+          <InstallDock />
         </section>
       </div>
 

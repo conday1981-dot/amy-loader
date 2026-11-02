@@ -1066,3 +1066,168 @@ select option {
     animation: none;
   }
 }
+
+/* ===================================================================
+   1.2 — live install dock (progress ring, stages, time left)
+   =================================================================== */
+.amy-dock {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(460px, calc(100vw - 36px));
+  pointer-events: none;
+}
+.amy-job {
+  pointer-events: auto;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: linear-gradient(160deg, rgba(18, 32, 58, 0.97), rgba(9, 16, 30, 0.97));
+  border: 1px solid var(--amy-line);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(94, 234, 212, 0.05), 0 0 34px rgba(94, 234, 212, 0.12);
+  animation: amy-job-in 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+.amy-job.done { border-color: rgba(94, 234, 212, 0.55); }
+.amy-job.failed { border-color: rgba(255, 122, 107, 0.6); box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 0 30px rgba(255, 122, 107, 0.15); }
+@keyframes amy-job-in { from { opacity: 0; transform: translateY(14px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+.amy-ring { position: relative; width: 76px; height: 76px; flex: 0 0 76px; }
+.amy-ring svg { width: 100%; height: 100%; overflow: visible; }
+.amy-ring-track { fill: none; stroke: rgba(94, 234, 212, 0.12); stroke-width: 6; }
+.amy-ring-fill {
+  fill: none;
+  stroke: var(--amy-teal);
+  stroke-width: 6;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 6px rgba(94, 234, 212, 0.75));
+  transition: stroke-dashoffset 0.45s ease;
+}
+.amy-ring-orbit {
+  fill: none;
+  stroke: rgba(182, 156, 255, 0.55);
+  stroke-width: 1.4;
+  stroke-dasharray: 3 9;
+  transform-origin: 42px 42px;
+}
+.amy-ring.live .amy-ring-orbit { animation: amy-spin 3.2s linear infinite; }
+.amy-ring.done .amy-ring-fill { stroke: var(--amy-teal); }
+.amy-ring.failed .amy-ring-fill { stroke: var(--amy-red); filter: drop-shadow(0 0 6px rgba(255, 122, 107, 0.7)); }
+.amy-ring.failed .amy-ring-orbit, .amy-ring.done .amy-ring-orbit { opacity: 0.35; }
+.amy-ring-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--amy-mono);
+  font-size: 17px;
+  color: var(--amy-text);
+  text-shadow: 0 0 10px rgba(94, 234, 212, 0.6);
+}
+.amy-ring.failed .amy-ring-label { color: var(--amy-red); text-shadow: none; }
+@keyframes amy-spin { to { transform: rotate(360deg); } }
+
+.amy-job-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.amy-job-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; position: relative; padding-right: 22px; }
+.amy-job-kind { font-family: var(--amy-mono); font-size: 10.5px; letter-spacing: 0.14em; color: var(--amy-violet); }
+.amy-job-title { font-size: 15px; }
+.amy-job-ver { font-family: var(--amy-mono); font-size: 12px; color: var(--amy-dim); font-weight: 400; }
+.amy-job-phone { font-size: 12px; color: var(--amy-dim); }
+.amy-job-close {
+  position: absolute; right: -6px; top: -6px;
+  width: 24px; height: 24px; padding: 0; line-height: 1; border-radius: 8px; font-size: 16px; color: var(--amy-dim);
+}
+
+.amy-stages { list-style: none; margin: 2px 0 0; padding: 0; display: flex; gap: 6px; }
+.amy-stage {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; letter-spacing: 0.04em; color: rgba(159, 184, 204, 0.55);
+  padding: 2px 8px 2px 6px; border-radius: 999px; border: 1px solid transparent;
+  transition: color 0.3s, border-color 0.3s, background 0.3s;
+}
+.amy-stage i { width: 7px; height: 7px; border-radius: 50%; background: rgba(159, 184, 204, 0.3); }
+.amy-stage.done { color: var(--amy-teal); }
+.amy-stage.done i { background: var(--amy-teal); }
+.amy-stage.active { color: var(--amy-text); border-color: var(--amy-line); background: rgba(94, 234, 212, 0.08); }
+.amy-stage.active i { background: var(--amy-teal); box-shadow: 0 0 0 0 rgba(94, 234, 212, 0.7); animation: amy-ping 1.3s ease-out infinite; }
+.amy-stage.failed { color: var(--amy-red); border-color: rgba(255, 122, 107, 0.4); }
+.amy-stage.failed i { background: var(--amy-red); }
+@keyframes amy-ping { 0% { box-shadow: 0 0 0 0 rgba(94, 234, 212, 0.65); } 100% { box-shadow: 0 0 0 7px rgba(94, 234, 212, 0); } }
+
+.amy-job-bar { position: relative; height: 4px; border-radius: 4px; background: rgba(94, 234, 212, 0.1); overflow: hidden; }
+.amy-job-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--amy-violet), var(--amy-teal), var(--amy-sky));
+  background-size: 200% 100%;
+  animation: amy-shimmer 1.6s linear infinite;
+  transition: width 0.45s ease;
+}
+.amy-job.done .amy-job-bar-fill, .amy-job.failed .amy-job-bar-fill { animation: none; }
+.amy-job.failed .amy-job-bar-fill { background: var(--amy-red); }
+@keyframes amy-shimmer { to { background-position: -200% 0; } }
+
+.amy-job-now { font-size: 13px; color: var(--amy-text); min-height: 18px; }
+.amy-job-error { color: var(--amy-red); }
+.amy-job-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-family: var(--amy-mono); font-size: 11.5px; color: var(--amy-dim); }
+.amy-job-eta { color: var(--amy-teal); margin-left: auto; }
+
+/* ===================================================================
+   1.2 — library
+   =================================================================== */
+.amy-lib { display: flex; flex-direction: column; gap: 10px; }
+.amy-lib-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+.amy-lib-toolbar button { padding: 6px 12px; font-size: 13px; }
+.amy-token.on { border-color: rgba(94, 234, 212, 0.5); color: var(--amy-teal); }
+.amy-lib-note { margin: 0; font-size: 12.5px; color: var(--amy-dim); line-height: 1.45; }
+.amy-lib-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.amy-lib-item {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  gap: 12px;
+  align-items: start;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--amy-line-soft);
+  background: rgba(10, 18, 34, 0.6);
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+.amy-lib-item.live { border-color: var(--amy-line); box-shadow: 0 0 22px rgba(94, 234, 212, 0.1); }
+.amy-lib-mono {
+  width: 44px; height: 44px; border-radius: 12px;
+  display: grid; place-items: center;
+  font-family: var(--amy-mono); font-size: 16px; color: var(--amy-bg);
+  background: linear-gradient(140deg, var(--amy-teal), var(--amy-violet));
+  box-shadow: 0 0 14px rgba(94, 234, 212, 0.25);
+}
+.amy-lib-info { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.amy-lib-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.amy-lib-ver { font-family: var(--amy-mono); font-size: 12px; color: var(--amy-text); }
+.amy-lib-sub { font-size: 12px; color: var(--amy-dim); overflow-wrap: anywhere; }
+.amy-dim { color: var(--amy-dim); }
+.amy-pill { font-family: var(--amy-mono); font-size: 10px; letter-spacing: 0.12em; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--amy-line); color: var(--amy-teal); }
+.amy-lib-progress { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--amy-text); }
+.amy-lib-actions { display: flex; gap: 6px; align-items: center; }
+.amy-lib-actions button { padding: 5px 10px; font-size: 12.5px; }
+.amy-danger-btn:hover:not(:disabled) { border-color: var(--amy-red) !important; color: var(--amy-red); }
+.amy-lib-edit-wrap { grid-column: 1 / -1; }
+.amy-lib-editor {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px; border-radius: 12px;
+  border: 1px dashed var(--amy-line); background: rgba(6, 12, 23, 0.6);
+}
+.amy-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--amy-dim); flex: 1; }
+.amy-field input, .amy-field select { padding: 7px 10px; font-size: 13px; }
+.amy-field-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.amy-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--amy-text); }
+.amy-lib-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.amy-empty { margin: 0; font-size: 13px; color: var(--amy-dim); line-height: 1.5; }
+
+@media (prefers-reduced-motion: reduce) {
+  .amy-ring.live .amy-ring-orbit, .amy-stage.active i, .amy-job-bar-fill, .amy-job { animation: none !important; }
+}

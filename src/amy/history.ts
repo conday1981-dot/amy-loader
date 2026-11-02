@@ -27,6 +27,9 @@ export type InstallRecord = {
   appleId: string;
   /** ISO timestamp of the last successful signing. */
   signedAt: string;
+  /** Read from the .ipa (A.M.Y Loader 1.2+); older records don't have them. */
+  bundleId?: string;
+  version?: string;
 };
 
 export type AmySettings = {
@@ -118,9 +121,11 @@ export async function recordInstall(
   const data = await read();
   const signedAt = rec.signedAt ?? new Date().toISOString();
   const key = deviceKey(rec);
+  const samePhone = (r: InstallRecord) => deviceKey(r) === key || (!r.deviceUdid && r.deviceName === rec.deviceName);
   const sameApp = (r: InstallRecord) =>
-    r.app.toLowerCase() === rec.app.toLowerCase() &&
-    (deviceKey(r) === key || (!r.deviceUdid && r.deviceName === rec.deviceName));
+    samePhone(r) &&
+    ((r.bundleId && rec.bundleId ? r.bundleId === rec.bundleId : r.app.toLowerCase() === rec.app.toLowerCase()) ||
+      r.ipaPath === rec.ipaPath);
   const previous = data.installs.filter(sameApp);
   const installs = data.installs.filter((r) => !sameApp(r));
   const saved: InstallRecord = { ...rec, signedAt, id: recordId(key, rec.app, signedAt) };
@@ -137,6 +142,29 @@ export async function recordInstall(
   }
   await s.save();
   return saved;
+}
+
+/**
+ * Point every record of an app at a newer .ipa (after a library update), so
+ * the next re-sign — manual or automatic — installs the new version.
+ * Matches by bundle id, or by any of the app's old library paths.
+ */
+export async function retargetInstalls(bundleId: string, oldPaths: string[], newPath: string): Promise<InstallRecord[]> {
+  const s = await store();
+  const data = await read();
+  const changed: InstallRecord[] = [];
+  const installs = data.installs.map((r) => {
+    const match = r.bundleId === bundleId || oldPaths.includes(r.ipaPath);
+    if (!match || r.ipaPath === newPath) return r;
+    const next = { ...r, bundleId, ipaPath: newPath };
+    changed.push(next);
+    return next;
+  });
+  if (changed.length) {
+    await s.set("installs", installs);
+    await s.save();
+  }
+  return changed;
 }
 
 export async function forgetInstall(id: string): Promise<void> {

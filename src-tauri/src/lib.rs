@@ -12,6 +12,8 @@ mod error;
 mod logging;
 mod operation;
 mod amy; // A.M.Y Loader: tray, start with Windows, notifications
+mod amy_install; // A.M.Y Loader: install with live progress
+mod amy_library; // A.M.Y Loader: app library + update sources
 
 use crate::{
     account::{
@@ -132,6 +134,16 @@ pub fn run() {
             amy::amy_set_background,
             amy::amy_show_window,
             amy::amy_notify,
+            amy_install::amy_sideload_operation,
+            amy_library::amy_library_list,
+            amy_library::amy_ipa_info,
+            amy_library::amy_library_import,
+            amy_library::amy_library_remove,
+            amy_library::amy_library_set_source,
+            amy_library::amy_library_check,
+            amy_library::amy_library_folder,
+            amy_library::amy_github_token_set,
+            amy_library::amy_github_token_present,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

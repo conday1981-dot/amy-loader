@@ -30,6 +30,7 @@ import {
   refreshDueAt,
 } from "./history";
 import { TRAY_REFRESH_EVENT, notifyDesktop, pushToPhone, showWindow } from "./native";
+import { installWithProgress } from "./installer";
 
 const TICK_MS = 5 * 60 * 1000;
 const STARTUP_DELAY_MS = 45 * 1000;
@@ -39,7 +40,8 @@ const WARN_EVERY_MS = 12 * 60 * 60 * 1000;
 /** Only nag about an unreachable phone once expiry is this close. */
 const WARN_WITHIN_MS = DAY_MS;
 
-export type RefreshReason = "timer" | "startup" | "tray" | "manual" | "test";
+/** "update": install a newly downloaded library version on the phones that have the app. */
+export type RefreshReason = "timer" | "startup" | "tray" | "manual" | "test" | "update";
 
 export type PassResult = { message: string; refreshed: number };
 
@@ -139,7 +141,7 @@ export function useAutoRefresh(deps: Deps) {
   }, []);
 
   const runPass = useCallback(
-    async (reason: RefreshReason): Promise<PassResult> => {
+    async (reason: RefreshReason, only?: string[]): Promise<PassResult> => {
       if (runningRef.current) return { message: "A refresh is already running.", refreshed: 0 };
       const d = depsRef.current;
       if (d.manualBusy) {
@@ -148,7 +150,8 @@ export function useAutoRefresh(deps: Deps) {
       }
       const settings = await getSettings();
       const interactive = reason === "manual" || reason === "test" || reason === "tray";
-      if (!settings.autoRefresh && !interactive) return { message: "Auto-refresh is off.", refreshed: 0 };
+      const isUpdate = reason === "update";
+      if (!settings.autoRefresh && !interactive && !isUpdate) return { message: "Auto-refresh is off.", refreshed: 0 };
 
       runningRef.current = true;
       accountRef.current = d.loggedInAs;
@@ -159,8 +162,9 @@ export function useAutoRefresh(deps: Deps) {
         let { installs } = await getAmyData();
         const states = await getRecordStates();
         const now = Date.now();
-        const force = reason === "test";
+        const force = reason === "test" || isUpdate;
         const due = installs.filter((r) => {
+          if (only && !only.includes(r.id)) return false;
           if (!force && now < refreshDueAt(r, settings.leadDays).getTime()) return false;
           const st = states[r.id];
           if (!force && st?.lastAttempt && now - new Date(st.lastAttempt).getTime() < backoffMs(st.failures ?? 0)) return false;
@@ -265,19 +269,24 @@ export function useAutoRefresh(deps: Deps) {
               }
             }
             for (const rec of recs.filter((r) => r.appleId === appleId)) {
-              step(`Re-signing ${rec.app} on ${device.name}`);
+              step(`${isUpdate ? "Updating" : "Re-signing"} ${rec.app} on ${device.name}`);
               await patchRecordState(rec.id, { lastAttempt: new Date().toISOString() });
               try {
-                await invoke("sideload_operation", { appPath: rec.ipaPath });
+                const { info, appName } = await installWithProgress(rec.ipaPath, device, isUpdate ? "update" : "refresh");
                 const saved = await recordInstall({
-                  app: rec.app,
+                  app: info ? appName : rec.app,
                   ipaPath: rec.ipaPath,
                   deviceUdid: device.udid,
                   deviceName: device.name,
                   appleId,
+                  bundleId: info?.bundleId ?? rec.bundleId,
+                  version: info?.version ?? rec.version,
                 });
                 done.push({ rec, saved });
-                await appendLog("ok", `Re-signed ${rec.app} on ${device.name}; good until ${formatWhen(expiresAt(saved))}.`);
+                await appendLog(
+                  "ok",
+                  `${isUpdate ? `Updated ${saved.app} to ${saved.version ?? "the new version"}` : `Re-signed ${saved.app}`} on ${device.name}; good until ${formatWhen(expiresAt(saved))}.`,
+                );
                 d.onHistoryChanged();
               } catch (e) {
                 failed.push({ rec, why: describe(e) });
@@ -307,12 +316,12 @@ export function useAutoRefresh(deps: Deps) {
           const what = phones
             .map((p) => `${done.filter((x) => x.rec.deviceName === p).map((x) => x.rec.app).join(", ")} on ${p}`)
             .join("; ");
-          await alert(settings, `Refreshed ${done.length} app${done.length > 1 ? "s" : ""}`, `${what}. Good until ${until}.`, {
+          await alert(settings, `${isUpdate ? "Updated" : "Refreshed"} ${done.length} app${done.length > 1 ? "s" : ""}`, `${what}. Good until ${until}.`, {
             tags: ["white_check_mark"],
           });
         }
         refreshed = done.length;
-        summary = `${done.length} refreshed${failed.length ? `, ${failed.length} failed` : ""}.`;
+        summary = `${done.length} ${isUpdate ? "updated" : "refreshed"}${failed.length ? `, ${failed.length} failed` : ""}.`;
         return { message: summary, refreshed };
       } catch (e) {
         summary = `Refresh stopped: ${describe(e)}`;

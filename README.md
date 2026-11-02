@@ -9,7 +9,9 @@ It's a reskin of **[iloader](https://github.com/nab138/iloader) by nab138** (MIT
 - A.M.Y holographic theme and layout (matches the A.M.Y hub), fonts bundled locally.
 - **This week** timeline: every app on every phone with its signing countdown, re-sign (↻) and stop-tracking (×) buttons.
 - Phone cards show Wi-Fi/USB, iOS version and the Apple ID that phone usually uses, with a one-tap switch.
-- Drag an `.ipa` anywhere onto the window to install it (`Ctrl+O` to choose one).
+- Drag an `.ipa` — or a `.zip` with one inside, such as a GitHub Actions artifact — anywhere onto the window (`Ctrl+O` to choose one). It's saved into the **Library** first, then installed if a phone and Apple ID are selected.
+- **Live install progress**: a dock shows each install's stage (Connect → Sign → Upload → Install), percentage, bytes and speed while uploading, elapsed time and an estimate of the time left. Estimates learn from previous installs (USB and Wi-Fi speeds are kept separately). Auto-refresh and library updates show there too.
+- **Library with updates**: every app is kept in A.M.Y's own folder (newest two versions, older ones deleted). Give an app an update source — GitHub releases, a GitHub Actions build (private repos with a token), an AltStore/SideStore source, or a direct link — and A.M.Y checks it every 6 hours, downloads newer versions (compared by version, then build number), and points re-signs at the new copy. With "install as soon as they download" on, it installs the update on the phones that have the app straight away.
 - iloader's SideStore/LiveContainer installers and tools (certificates, App IDs, pairing files, settings, logs) live under **Advanced**.
 - **Auto-refresh**: every 5 minutes it looks for apps within 2 days (adjustable) of expiring and, for each phone it can reach over Wi-Fi or USB, signs in with that app's Apple ID and re-installs the same `.ipa`. Failures back off; if a phone stays unreachable as expiry gets close, it says so.
 - **Runs in the background**: starts with Windows hidden in the tray; closing the window keeps it running (tray menu: Open / Refresh apps now / Quit). One copy at a time.
@@ -25,9 +27,11 @@ It's a reskin of **[iloader](https://github.com/nab138/iloader) by nab138** (MIT
 | Saved login list, settings | `%APPDATA%\uk.amy.loader\data.json`, `preferences.json` |
 | Install history, auto-refresh settings, activity log | `%APPDATA%\uk.amy.loader\amy.json` |
 | Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `AMY Loader` (only while "Run in the background" is on) |
-| `.ipa` files | wherever you keep them; A.M.Y Loader stores the path to re-sign later |
+| `.ipa` files | `%APPDATA%\uk.amy.loader\library\<bundle id>\` (index: `library.json`); records made before 1.2 may still point at the original file |
+| Install-time estimates | `amy.json` → `timings` |
+| GitHub token (optional, for private repos / Actions artifacts) | Windows Credential Manager, under `uk.amy.loader` |
 
-Nothing is sent anywhere except to Apple (sign-in, signing), the anisette server chosen in Settings, the ntfy server if phone alerts are on, and the update feed (a version check).
+Nothing is sent anywhere except to Apple (sign-in, signing), the anisette server chosen in Settings, the ntfy server if phone alerts are on, the update feed (a version check), and the update sources you set for library apps (GitHub, AltStore sources or links).
 
 ## Auto-refresh: what it needs
 
@@ -51,7 +55,7 @@ bunx tauri build --config src-tauri/amy.conf.json --bundles nsis
 
 ## Keeping the engine current
 
-All A.M.Y-specific files sit apart from iloader's: `src/amy/`, `src-tauri/src/amy.rs` (tray, start with Windows, notifications), `src-tauri/amy.conf.json` (name, ID, window, icons, update feed; layered over iloader's `tauri.conf.json` at build time), `src-tauri/amy-icons/` and `updates/`. The iloader files changed are `src/App.tsx`, `src/Device.tsx`, `src/main.tsx` and `index.html`, plus a few lines in `src-tauri/src/lib.rs` and `src-tauri/Cargo.toml` (three plugins, pinned to versions that match iloader's Tauri version) and `Cargo.lock`.
+All A.M.Y-specific files sit apart from iloader's: `src/amy/`, `src-tauri/src/amy.rs` (tray, start with Windows, notifications), `src-tauri/src/amy_install.rs` (install with live progress — the same steps as isideload's `install_app`, run one by one so each reports progress), `src-tauri/src/amy_library.rs` (library, update sources), `src-tauri/amy.conf.json` (name, ID, window, icons, update feed; layered over iloader's `tauri.conf.json` at build time), `src-tauri/amy-icons/` and `updates/`. The iloader files changed are `src/App.tsx`, `src/Device.tsx`, `src/main.tsx` and `index.html`, plus a few lines in `src-tauri/src/lib.rs` and `src-tauri/Cargo.toml` (three plugins, pinned to versions that match iloader's Tauri version) and `Cargo.lock`.
 
 `.github/workflows/sync-upstream.yml` checks iloader every Monday. If iloader's new commits merge cleanly (a `Cargo.lock` conflict is settled automatically) it opens a pull request, and if they don't it opens an issue listing what conflicted. To do it by hand:
 
