@@ -18,6 +18,8 @@ It's a reskin of **[iloader](https://github.com/nab138/iloader) by nab138** (MIT
 - **Phone alerts** through [ntfy](https://ntfy.sh) (optional): refreshed, couldn't refresh, connect your phone, Apple wants a 2FA code. Alerts name the app and phone, never the Apple ID.
 - **Track an installed app**: add an app that's already on a phone (from iloader, Sideloadly…) without reinstalling it.
 - **Self-update** from A.M.Y's feed on Cloudflare, signed with A.M.Y's key (iloader's updater, which would install plain iloader, stays off).
+- **System status** in the header: one dot per service (internet, Apple sign-in, anisette server, Apple developer services, Apple ID, iPhones, last install, secure storage, iloader engine) and the worst one named, e.g. `APPLE SIGN-IN DOWN`. Click it for what each one means and what to do. It re-checks every 5 minutes, after every sign-in and install, and on "Check now". It combines live checks with what actually happened at the last sign-in/install, so a banned provisioning profile shows as **BLOCKED**, a 429 as rate-limited, and so on.
+- **Sign-in identity failover**: Apple periodically refuses one of the Mac identities iloader signs in as (HTTP 503 from `gsa.apple.com` — Aug, Oct and 19 Nov 2026). When that happens A.M.Y signs in again as the next identity in `PROFILES` (`src-tauri/src/amy_status.rs`) and remembers the one that worked. Only 502/503/504 trigger it; wrong passwords, locked accounts and 429s fail straight away.
 
 ## Where data lives (all on this PC)
 
@@ -55,7 +57,7 @@ bunx tauri build --config src-tauri/amy.conf.json --bundles nsis
 
 ## Keeping the engine current
 
-All A.M.Y-specific files sit apart from iloader's: `src/amy/`, `src-tauri/src/amy.rs` (tray, start with Windows, notifications), `src-tauri/src/amy_install.rs` (install with live progress — the same steps as isideload's `install_app`, run one by one so each reports progress), `src-tauri/src/amy_library.rs` (library, update sources), `src-tauri/amy.conf.json` (name, ID, window, icons, update feed; layered over iloader's `tauri.conf.json` at build time), `src-tauri/amy-icons/` and `updates/`. The iloader files changed are `src/App.tsx`, `src/Device.tsx`, `src/main.tsx` and `index.html`, plus a few lines in `src-tauri/src/lib.rs` and `src-tauri/Cargo.toml` (three plugins, pinned to versions that match iloader's Tauri version) and `Cargo.lock`.
+All A.M.Y-specific files sit apart from iloader's: `src/amy/`, `src-tauri/src/amy.rs` (tray, start with Windows, notifications), `src-tauri/src/amy_install.rs` (install with live progress — the same steps as isideload's `install_app`, run one by one so each reports progress), `src-tauri/src/amy_library.rs` (library, update sources), `src-tauri/src/amy_status.rs` (sign-in identity failover, status checks), `src-tauri/amy.conf.json` (name, ID, window, icons, update feed; layered over iloader's `tauri.conf.json` at build time), `src-tauri/amy-icons/` and `updates/`. The iloader files changed are `src/App.tsx`, `src/Device.tsx`, `src/main.tsx` and `index.html`, plus a few lines in `src-tauri/src/lib.rs` and `src-tauri/Cargo.toml` (three plugins, pinned to versions that match iloader's Tauri version) and `Cargo.lock`.
 
 `.github/workflows/sync-upstream.yml` checks iloader every Monday. If iloader's new commits merge cleanly (a `Cargo.lock` conflict is settled automatically) it opens a pull request, and if they don't it opens an issue listing what conflicted. To do it by hand:
 
@@ -66,6 +68,10 @@ git merge upstream/main
 ```
 
 Then update `UPSTREAM_ENGINE_VERSION` in `src/amy/meta.ts`.
+
+`src-tauri/src/account.rs` hands sign-in to `amy_status::login_with_failover` instead of building the Apple account itself, and `amy_install.rs` reports each install result to the status panel. When iloader changes the client identity in `account.rs`, that merge conflicts on purpose: keep the call into `amy_status.rs` and add iloader's new identity to the top of `PROFILES`.
+
+If a sync or build fails within seconds with *"recent account payments have failed or your spending limit needs to be increased"*, GitHub Actions is out of minutes for the account. Windows runners count double against a private repo's free minutes. Fix it under GitHub → Settings → Billing and plans.
 
 ## Licence
 

@@ -14,6 +14,7 @@ mod operation;
 mod amy; // A.M.Y Loader: tray, start with Windows, notifications
 mod amy_install; // A.M.Y Loader: install with live progress
 mod amy_library; // A.M.Y Loader: app library + update sources
+mod amy_status; // A.M.Y Loader: sign-in identity failover + status panel
 
 use crate::{
     account::{
@@ -144,6 +145,7 @@ pub fn run() {
             amy_library::amy_library_folder,
             amy_library::amy_github_token_set,
             amy_library::amy_github_token_present,
+            amy_status::amy_status_check,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

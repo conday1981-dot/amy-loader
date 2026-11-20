@@ -19,7 +19,7 @@ use isideload::{
     util::device::IdeviceInfo,
 };
 use serde::Serialize;
-use tauri::{Emitter, State, Window};
+use tauri::{Emitter, Manager, State, Window};
 
 use crate::{
     device::{DeviceInfoMutex, get_provider},
@@ -186,10 +186,9 @@ pub async fn amy_sideload_operation(
     let op = Operation::new("amy_sideload".to_string(), &window);
     op.start("install")?;
     let reporter = Reporter { window: window.clone(), job_id };
-    op.fail_if_err(
-        "install",
-        run(&device_state, &sideloader_state, PathBuf::from(app_path), reporter).await,
-    )?;
+    let result = run(&device_state, &sideloader_state, PathBuf::from(app_path), reporter).await;
+    crate::amy_status::note_install_result(window.app_handle(), &result);
+    op.fail_if_err("install", result)?;
     op.complete("install")?;
     Ok(())
 }
