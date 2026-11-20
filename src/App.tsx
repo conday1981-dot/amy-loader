@@ -582,7 +582,7 @@ function App() {
     };
   }, [amySettings.checkUpdates, checkUpdate]);
 
-  const systemStatus = useSystemStatus({ anisetteServer, loggedInAs, connected, selectedDevice, noKeyringAvailable });
+  const systemStatus = useSystemStatus({ anisetteServer, installs, loggedInAs, connected, selectedDevice, noKeyringAvailable });
 
   const nextRefresh = (() => {
     const upcoming = installs

@@ -35,7 +35,7 @@ export type InstallRecord = {
 export type AmySettings = {
   /** Re-sign apps automatically before they expire. */
   autoRefresh: boolean;
-  /** How many days before expiry to start trying. */
+  /** How many days before expiry to start trying (1–6; 6 = re-sign once an app is a day old). */
   leadDays: number;
   /** Start with Windows (hidden in the tray) and keep running when closed. */
   background: boolean;
@@ -45,11 +45,22 @@ export type AmySettings = {
   ntfyServer: string;
   /** Check the A.M.Y update feed on start. */
   checkUpdates: boolean;
+  /** Settings schema version (for one-time migrations). */
+  settingsVersion?: number;
 };
+
+/** Most days ahead auto-refresh may start (an app is re-signed once it is a day old). */
+export const MAX_LEAD_DAYS = FREE_SIGNING_DAYS - 1;
+/**
+ * v2 (A.M.Y 1.2.3): runway. Apple's sign-in has gone down for hours to days
+ * at a time (Aug, Oct, Nov 2026). Re-signing once an app is a day old keeps
+ * 5–6 days in hand, so an outage has to outlast that before anything expires.
+ */
+const SETTINGS_VERSION = 2;
 
 export const DEFAULT_SETTINGS: AmySettings = {
   autoRefresh: true,
-  leadDays: 2,
+  leadDays: MAX_LEAD_DAYS,
   background: true,
   ntfyTopic: "",
   ntfyServer: "https://ntfy.sh",
@@ -207,13 +218,24 @@ export async function backfillDeviceIds(connected: { name: string; udid: string 
 
 export async function getSettings(): Promise<AmySettings> {
   const s = await store();
-  return { ...DEFAULT_SETTINGS, ...((await s.get<Partial<AmySettings>>("settings")) ?? {}) };
+  const saved = await s.get<Partial<AmySettings>>("settings");
+  const merged: AmySettings = { ...DEFAULT_SETTINGS, ...(saved ?? {}) };
+  if (saved && (saved.settingsVersion ?? 1) < SETTINGS_VERSION) {
+    // One-time move to the outage-proof runway (see SETTINGS_VERSION).
+    merged.leadDays = MAX_LEAD_DAYS;
+    merged.settingsVersion = SETTINGS_VERSION;
+    await s.set("settings", merged);
+    await s.save();
+    await appendLog("info", `Auto-refresh now re-signs apps once they're a day old, so an Apple sign-in outage of up to ${MAX_LEAD_DAYS - 1} days won't let anything expire.`);
+  }
+  return merged;
 }
 
 export async function saveSettings(patch: Partial<AmySettings>): Promise<AmySettings> {
   const s = await store();
   const next = { ...(await getSettings()), ...patch };
-  next.leadDays = Math.min(5, Math.max(1, Math.round(next.leadDays)));
+  next.leadDays = Math.min(MAX_LEAD_DAYS, Math.max(1, Math.round(next.leadDays)));
+  next.settingsVersion = SETTINGS_VERSION;
   next.ntfyTopic = next.ntfyTopic.trim();
   next.ntfyServer = (next.ntfyServer.trim() || DEFAULT_SETTINGS.ntfyServer).replace(/\/+$/, "");
   await s.set("settings", next);

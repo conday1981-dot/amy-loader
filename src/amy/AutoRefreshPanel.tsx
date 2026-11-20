@@ -6,6 +6,7 @@ import {
   AmySettings,
   InstallRecord,
   LogEntry,
+  MAX_LEAD_DAYS,
   clearLog,
   expiresAt,
   formatWhen,
@@ -135,12 +136,15 @@ export function AutoRefreshPanel({
       <div className="amy-ar-row">
         <div>
           <strong>Start trying</strong>
-          <small>Earlier gives more chances to catch a phone on Wi-Fi.</small>
+          <small>
+            Earlier keeps more days in hand: if Apple's sign-in goes down, apps keep working while A.M.Y retries.{" "}
+            {MAX_LEAD_DAYS} days = re-sign once an app is a day old (recommended).
+          </small>
         </div>
         <select value={settings.leadDays} onChange={(e) => update({ leadDays: Number(e.target.value) })}>
-          {[1, 2, 3, 4, 5].map((n) => (
+          {Array.from({ length: MAX_LEAD_DAYS }, (_, i) => MAX_LEAD_DAYS - i).map((n) => (
             <option key={n} value={n}>
-              {n} day{n > 1 ? "s" : ""} before expiry
+              {n} day{n > 1 ? "s" : ""} before expiry{n === MAX_LEAD_DAYS ? " (recommended)" : ""}
             </option>
           ))}
         </select>

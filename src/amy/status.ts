@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { DeviceInfo } from "../Device";
+import { DAY_MS, InstallRecord, expiresAt, formatWhen } from "./history";
 
 export type Health = "ok" | "unknown" | "warn" | "down" | "blocked";
 
@@ -41,7 +42,7 @@ const POLL_MS = 5 * 60 * 1000;
 const STALE_MS = 2 * 60 * 1000;
 
 const RANK: Record<Health, number> = { ok: 0, unknown: 1, warn: 2, down: 3, blocked: 4 };
-const ORDER = ["internet", "signin", "anisette", "developer", "appleid", "phone", "install", "storage", "engine"];
+const ORDER = ["runway", "internet", "signin", "anisette", "developer", "appleid", "phone", "install", "storage", "engine"];
 
 export function worst(items: StatusItem[]): Health {
   return items.reduce<Health>((w, i) => (RANK[i.state] > RANK[w] ? i.state : w), "ok");
@@ -63,16 +64,46 @@ export function ago(ms: number): string {
 
 type LocalInputs = {
   anisetteServer: string;
+  installs: InstallRecord[];
   loggedInAs: string | null;
   connected: DeviceInfo[];
   selectedDevice: DeviceInfo | null;
   noKeyringAvailable: boolean;
 };
 
+/** How long until the first tracked app stops opening. */
+function runwayItem(installs: InstallRecord[]): StatusItem {
+  const label = "App expiry";
+  if (installs.length === 0) return { id: "runway", label, state: "unknown", summary: "No apps tracked yet" };
+  const soonest = installs.reduce((a, b) => (expiresAt(a).getTime() <= expiresAt(b).getTime() ? a : b));
+  const left = expiresAt(soonest).getTime() - Date.now();
+  const days = left / DAY_MS;
+  const what = `${soonest.app} on ${soonest.deviceName}`;
+  if (left <= 0) {
+    return {
+      id: "runway",
+      label,
+      state: "down",
+      summary: `${what} has expired`,
+      fix: "Don't delete it: its data comes back when it's re-signed. Re-sign it from the timeline once Apple sign-in is OK.",
+    };
+  }
+  const when = formatWhen(expiresAt(soonest));
+  const span = days >= 1 ? `${Math.floor(days)} day${Math.floor(days) === 1 ? "" : "s"}` : `${Math.max(1, Math.round(left / 3_600_000))} h`;
+  if (days < 1) {
+    return { id: "runway", label, state: "down", summary: `${what} stops opening ${when} (${span} left)`, fix: "Keep the phone on home Wi-Fi and unlocked; A.M.Y retries every 30 minutes." };
+  }
+  if (days < 3) {
+    return { id: "runway", label, state: "warn", summary: `${what} has ${span} left (until ${when})`, fix: "Fine for now. A.M.Y re-signs automatically as soon as Apple sign-in works." };
+  }
+  return { id: "runway", label, state: "ok", summary: `Every app has at least ${span} left (soonest: ${what})` };
+}
+
 function localItems(i: LocalInputs): StatusItem[] {
   const phones = i.connected;
   const wifi = phones.filter((p) => p.connectionType === "Network").length;
   return [
+    runwayItem(i.installs),
     i.loggedInAs
       ? { id: "appleid", label: "Apple ID", state: "ok", summary: `Signed in as ${i.loggedInAs}` }
       : {

@@ -2,7 +2,8 @@
 //
 // Every few minutes (and on start-up, from the tray menu, or from the
 // Auto-refresh panel) this looks for tracked apps that are within
-// `leadDays` of expiring. For each one whose phone is reachable (USB, or
+// `leadDays` of expiring (default 6: re-sign once an app is a day old, so an
+// Apple sign-in outage has days to clear before anything expires). For each one whose phone is reachable (USB, or
 // Wi-Fi via "Sync with this iPhone over Wi-Fi") it selects the phone, signs in
 // with the Apple ID that app was signed with, and re-installs the same .ipa
 // using iloader's own commands — so the engine itself is unchanged.
@@ -37,8 +38,8 @@ const STARTUP_DELAY_MS = 45 * 1000;
 const SELECT_TIMEOUT_MS = 90 * 1000;
 /** Re-warn about an unreachable phone at most this often. */
 const WARN_EVERY_MS = 12 * 60 * 60 * 1000;
-/** Only nag about an unreachable phone once expiry is this close. */
-const WARN_WITHIN_MS = DAY_MS;
+/** Alert (unreachable phone, failed refresh) once expiry is this close. */
+const WARN_WITHIN_MS = 2 * DAY_MS;
 
 /** "update": install a newly downloaded library version on the phones that have the app. */
 export type RefreshReason = "timer" | "startup" | "tray" | "manual" | "test" | "update";
@@ -107,10 +108,17 @@ function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promi
   });
 }
 
-/** Back-off after real signing failures: 10, 20, 40, then every 60 minutes. */
-function backoffMs(failures: number) {
+/**
+ * Back-off after failures: 10, 20, 40, 80… minutes, capped by how much time
+ * the app has left. With days in hand it waits up to 6 hours between tries,
+ * so an Apple sign-in outage isn't hammered (repeated sign-ins can get an
+ * Apple ID throttled); it tries harder as expiry gets close.
+ */
+export function backoffMs(failures: number, msLeft: number) {
   if (!failures) return 0;
-  return Math.min(60, 10 * 2 ** (failures - 1)) * 60 * 1000;
+  const hours = msLeft / (60 * 60 * 1000);
+  const capMin = hours > 48 ? 360 : hours > 24 ? 120 : hours > 6 ? 60 : 30;
+  return Math.min(capMin, 10 * 2 ** Math.min(failures - 1, 10)) * 60 * 1000;
 }
 
 async function listDevices(): Promise<DeviceInfo[]> {
@@ -167,7 +175,7 @@ export function useAutoRefresh(deps: Deps) {
           if (only && !only.includes(r.id)) return false;
           if (!force && now < refreshDueAt(r, settings.leadDays).getTime()) return false;
           const st = states[r.id];
-          if (!force && st?.lastAttempt && now - new Date(st.lastAttempt).getTime() < backoffMs(st.failures ?? 0)) return false;
+          if (!force && st?.lastAttempt && now - new Date(st.lastAttempt).getTime() < backoffMs(st.failures ?? 0, expiresAt(r).getTime() - now)) return false;
           return true;
         });
         if (due.length === 0) {
