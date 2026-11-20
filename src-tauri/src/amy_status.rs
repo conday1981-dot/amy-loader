@@ -32,7 +32,7 @@ use isideload::{
     SideloadError,
     anisette::{AnisetteClientInfo, remote_v3::RemoteV3AnisetteProvider},
     auth::apple_account::AppleAccount,
-    util::callbacks::TwoFactorCallback,
+    util::{callbacks::TwoFactorCallback, storage::SideloadingStorage},
 };
 use rootcause::Report;
 use serde::Serialize;
@@ -47,6 +47,12 @@ use crate::{error::AppError, secure_storage::create_sideloading_storage};
 pub const STATUS_EVENT: &str = "amy://status-changed";
 const STORE_FILE: &str = "data.json";
 const STORE_PROFILE_KEY: &str = "amyClientProfile";
+/// Anisette server that last worked when the one in Settings didn't.
+const STORE_ANISETTE_KEY: &str = "amyAnisetteFallback";
+
+/// iloader's built-in anisette servers (src/pages/Settings.tsx). Tried, in
+/// this order, after the one chosen in Settings.
+const ANISETTE_SERVERS: &[&str] = &["mac-ani.jkcoxson.com", "ani.iloader.app", "new.ani.sidestore.io"];
 /// Pause before signing in again with the next identity.
 const FAILOVER_PAUSE: Duration = Duration::from_secs(3);
 /// Each status probe gives up after this long.
@@ -172,7 +178,86 @@ fn grandslam_unavailable(report: &Report) -> bool {
         && ["502 ", "503 ", "504 "].iter().any(|code| text.contains(code))
 }
 
-/// Sign in, moving to the next identity whenever GrandSlam answers 502/503/504.
+/// Keeps a fallback server's anisette state under its own key, so trying
+/// another server never touches the state of the one chosen in Settings.
+struct PrefixedStorage {
+    inner: Box<dyn SideloadingStorage>,
+    prefix: String,
+}
+
+impl SideloadingStorage for PrefixedStorage {
+    fn store(&self, key: &str, value: &str) -> Result<(), Report> {
+        self.inner.store(&format!("{}{key}", self.prefix), value)
+    }
+    fn retrieve(&self, key: &str) -> Result<Option<String>, Report> {
+        self.inner.retrieve(&format!("{}{key}", self.prefix))
+    }
+}
+
+fn host_of(server: &str) -> String {
+    server
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
+fn url_of(server: &str) -> String {
+    if server.starts_with("http") {
+        server.trim_end_matches('/').to_string()
+    } else {
+        format!("https://{}", server.trim_end_matches('/'))
+    }
+}
+
+/// The anisette server itself failed (down, or its data was unusable).
+fn anisette_failed(report: &Report) -> bool {
+    let text = report.to_string();
+    text.contains("Failed to get anisette data for login")
+        || text.contains("Failed to get anisette client info")
+        || text.contains("Failed to get anisette headers")
+}
+
+/// Servers to try: the one that rescued the last sign-in (if any), the one
+/// in Settings, then the other built-in servers.
+fn server_order(app: &AppHandle, configured: &str) -> Vec<String> {
+    let remembered = app
+        .store(STORE_FILE)
+        .ok()
+        .and_then(|s| s.get(STORE_ANISETTE_KEY))
+        .and_then(|v| v.as_str().map(host_of));
+    let mut order: Vec<String> = Vec::new();
+    for host in remembered
+        .into_iter()
+        .chain(std::iter::once(host_of(configured)))
+        .chain(ANISETTE_SERVERS.iter().map(|s| host_of(s)))
+    {
+        if !order.contains(&host) {
+            order.push(host);
+        }
+    }
+    order
+}
+
+fn remember_server(app: &AppHandle, host: Option<&str>) {
+    if let Ok(store) = app.store(STORE_FILE) {
+        match host {
+            Some(h) => store.set(STORE_ANISETTE_KEY, Value::String(h.to_string())),
+            None => {
+                store.delete(STORE_ANISETTE_KEY);
+            }
+        }
+    }
+}
+
+/// Sign in, working around Apple refusing an identity and anisette servers
+/// failing:
+/// 1. the anisette server in Settings with every known identity;
+/// 2. each other built-in anisette server with the preferred identity.
+///
+/// Only refusals that happen before the password is checked, and anisette
+/// failures, move on; anything else (wrong password, locked account, 429)
+/// stops at once. At most 3 + 2 attempts, 3 s apart.
 pub async fn login_with_failover<C>(
     app: &AppHandle,
     email: &str,
@@ -183,58 +268,80 @@ pub async fn login_with_failover<C>(
 where
     C: TwoFactorCallback + Clone,
 {
-    let order = profile_order(app);
-    let mut refused: Vec<&'static str> = Vec::new();
+    let profiles = profile_order(app);
+    let configured = host_of(anisette_url);
+    let servers = server_order(app, anisette_url);
+    let mut refused: Vec<String> = Vec::new();
+    let mut attempts = 0usize;
+    let mut last: Option<(Report, String)> = None;
 
-    for (i, profile) in order.iter().enumerate() {
-        if i > 0 {
-            tokio::time::sleep(FAILOVER_PAUSE).await;
-        }
-        info!("Signing in to Apple as '{}'", profile.label);
-        let provider = RemoteV3AnisetteProvider::default()?
-            .set_serial_number("0".to_string())
-            .set_storage(create_sideloading_storage(app)?)
-            .set_client_info_override(profile.client_info())
-            .set_url(anisette_url);
-
-        let attempt = AppleAccount::builder(email)
-            .anisette_provider(provider)
-            .login(password, two_factor.clone())
-            .await;
-
-        match attempt {
-            Ok(account) => {
-                remember_profile(app, profile);
-                record_login(app, LoginOutcome::SignedIn {
-                    profile: profile.label,
-                    refused: refused.clone(),
-                });
-                return Ok(account);
+    for host in &servers {
+        let is_configured = *host == configured;
+        // Every identity on the server from Settings; the preferred one elsewhere.
+        let to_try: &[&'static ClientProfile] = if is_configured { &profiles } else { &profiles[..1] };
+        for profile in to_try {
+            if attempts > 0 {
+                tokio::time::sleep(FAILOVER_PAUSE).await;
             }
-            Err(report) => match identity_refused(&report) {
-                Some(reason) => {
-                    warn!(
-                        "Apple's sign-in server refused identity '{}' ({reason}){}",
-                        profile.label,
-                        if i + 1 < order.len() { "; trying the next one" } else { "" }
-                    );
-                    refused.push(profile.label);
-                    if i + 1 == order.len() {
-                        let err = AppError::from(report);
-                        record_login(app, LoginOutcome::AllRefused { reason });
-                        return Err(err);
+            attempts += 1;
+            info!("Signing in to Apple as '{}' via {host}", profile.label);
+            let storage: Box<dyn SideloadingStorage> = if is_configured {
+                create_sideloading_storage(app)?
+            } else {
+                Box::new(PrefixedStorage {
+                    inner: create_sideloading_storage(app)?,
+                    prefix: format!("amy-ani:{host}:"),
+                })
+            };
+            let provider = RemoteV3AnisetteProvider::default()?
+                .set_serial_number("0".to_string())
+                .set_storage(storage)
+                .set_client_info_override(profile.client_info())
+                .set_url(&url_of(host));
+
+            let attempt = AppleAccount::builder(email)
+                .anisette_provider(provider)
+                .login(password, two_factor.clone())
+                .await;
+
+            match attempt {
+                Ok(account) => {
+                    remember_profile(app, profile);
+                    remember_server(app, if is_configured { None } else { Some(host) });
+                    record_login(app, LoginOutcome::SignedIn {
+                        profile: profile.label,
+                        server: (!is_configured).then(|| host.clone()),
+                        refused: refused.clone(),
+                    });
+                    return Ok(account);
+                }
+                Err(report) => {
+                    let reason = identity_refused(&report)
+                        .or_else(|| anisette_failed(&report).then(|| "anisette server failed".to_string()));
+                    match reason {
+                        Some(reason) => {
+                            warn!("Sign-in as '{}' via {host} failed ({reason}); trying the next option", profile.label);
+                            refused.push(format!("{} via {host}", profile.label));
+                            last = Some((report, reason));
+                        }
+                        None => {
+                            let err = AppError::from(report);
+                            record_login(app, LoginOutcome::Failed {
+                                kind: err.as_ref().to_string(),
+                                message: err.to_string(),
+                            });
+                            return Err(err);
+                        }
                     }
                 }
-                None => {
-                    let err = AppError::from(report);
-                    record_login(app, LoginOutcome::Failed {
-                        kind: err.as_ref().to_string(),
-                        message: err.to_string(),
-                    });
-                    return Err(err);
-                }
-            },
+            }
         }
+    }
+
+    if let Some((report, reason)) = last {
+        let err = AppError::from(report);
+        record_login(app, LoginOutcome::AllRefused { reason, tried: attempts });
+        return Err(err);
     }
     // PROFILES is never empty, so the loop always returns.
     Err(AppError::Misc("No sign-in identities configured".into()))
@@ -244,8 +351,8 @@ where
 
 #[derive(Clone)]
 enum LoginOutcome {
-    SignedIn { profile: &'static str, refused: Vec<&'static str> },
-    AllRefused { reason: String },
+    SignedIn { profile: &'static str, server: Option<String>, refused: Vec<String> },
+    AllRefused { reason: String, tried: usize },
     Failed { kind: String, message: String },
 }
 
@@ -442,23 +549,28 @@ fn signin_item(p: &Probe, login: Option<Stamped<LoginOutcome>>) -> StatusItem {
     // What actually happened at the last sign-in matters more than a ping.
     if let Some(Stamped { at_ms, value }) = login.filter(|s| fresh(s.at_ms)) {
         item = match value {
-            LoginOutcome::SignedIn { profile, refused } if refused.is_empty() => {
+            LoginOutcome::SignedIn { profile, refused, .. } if refused.is_empty() => {
                 StatusItem::new("signin", L, Health::Ok.max(item.state), format!("Signed in fine as \"{profile}\""))
             }
-            LoginOutcome::SignedIn { profile, refused } => StatusItem::new(
+            LoginOutcome::SignedIn { profile, server, refused } => StatusItem::new(
                 "signin",
                 L,
                 Health::Warn.max(item.state),
-                format!("Working, but Apple refused \"{}\", so A.M.Y switched to \"{profile}\" automatically", refused.join("\", \"")),
+                format!(
+                    "Working, but only after A.M.Y worked around {} refusal{}: signed in as \"{profile}\"{}",
+                    refused.len(),
+                    if refused.len() == 1 { "" } else { "s" },
+                    server.map(|h| format!(" via {h}")).unwrap_or_default(),
+                ),
             )
-            .fix("Nothing to do now. A newer iloader engine usually follows within a day or two."),
-            LoginOutcome::AllRefused { reason } => StatusItem::new(
+            .fix("Nothing to do: A.M.Y uses what worked first next time. A newer iloader engine usually follows within a day or two."),
+            LoginOutcome::AllRefused { reason, tried } => StatusItem::new(
                 "signin",
                 L,
                 Health::Down,
-                format!("Apple turned away sign-in from every identity A.M.Y knows ({reason})"),
+                format!("Apple turned away all {tried} sign-in routes A.M.Y knows (last: {reason})"),
             )
-            .fix("Try a different anisette server in Settings and sign in once more. If that fails too, it's Apple's side: wait an hour or two (repeated attempts can make it last longer) and watch the engine row for an iloader update."),
+            .fix("It's on Apple's side. Your apps keep working until the App expiry row says otherwise, and A.M.Y retries on its own (gently, so the Apple ID isn't throttled). If something is about to expire, use Sideloadly as a stand-in."),
             LoginOutcome::Failed { kind, message } => classify_login_failure(&kind, &message),
         }
         .at(at_ms);
@@ -694,6 +806,14 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), PROFILES.len());
+    }
+
+    #[test]
+    fn anisette_server_names_normalise() {
+        assert_eq!(host_of("https://Ani.iloader.app/"), "ani.iloader.app");
+        assert_eq!(url_of("ani.iloader.app"), "https://ani.iloader.app");
+        assert_eq!(url_of("http://192.168.1.5:6969/"), "http://192.168.1.5:6969");
+        assert_eq!(ANISETTE_SERVERS.len(), 3);
     }
 
     #[test]
