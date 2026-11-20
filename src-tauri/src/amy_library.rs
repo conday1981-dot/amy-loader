@@ -93,6 +93,9 @@ pub struct IpaInfo {
     pub min_os: Option<String>,
     /// Size of the .ipa file in bytes.
     pub size: u64,
+    /// The app has an Apple Health usage description, so A.M.Y Loader switches
+    /// HealthKit on for its App ID before signing (see amy_capabilities.rs).
+    pub wants_healthkit: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -222,6 +225,7 @@ fn read_info_from_zip<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>)
         build: get("CFBundleVersion").unwrap_or_else(|| "0".into()),
         min_os: get("MinimumOSVersion"),
         size: 0,
+        wants_healthkit: crate::amy_capabilities::HEALTH_USAGE_KEYS.iter().any(|k| dict.contains_key(k)),
         bundle_id,
     }))
 }
