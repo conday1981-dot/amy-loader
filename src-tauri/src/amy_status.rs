@@ -11,7 +11,8 @@
 //! So A.M.Y keeps a short list of known identities and, when GrandSlam answers
 //! 502/503/504, signs in again with the next one. The identity that worked is
 //! remembered (data.json → `amyClientProfile`) and tried first next time.
-//! Only server-unavailable answers trigger a retry: a wrong password, a locked
+//! Only identity refusals (HTTP 502/503/504, or GrandSlam -22410 at the
+//! first request, before the password is checked) trigger a retry: a wrong password, a locked
 //! account or a rate limit (429) fails straight away, so the failover can
 //! never hammer Apple or lock an account.
 //!
@@ -28,6 +29,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use isideload::{
+    SideloadError,
     anisette::{AnisetteClientInfo, remote_v3::RemoteV3AnisetteProvider},
     auth::apple_account::AppleAccount,
     util::callbacks::TwoFactorCallback,
@@ -123,6 +125,32 @@ fn profile_order(app: &AppHandle) -> Vec<&'static ClientProfile> {
         .collect()
 }
 
+/// GrandSlam codes Apple has used to turn away a client identity at the very
+/// first sign-in request (before the password is checked):
+/// -22410 "This action could not be completed. Try again." (AltServer, Feb
+/// 2026; iloader, 20 Nov 2026).
+const IDENTITY_REFUSED_CODES: &[i64] = &[-22410];
+
+/// Why Apple turned an identity away, if it did.
+fn identity_refused(report: &Report) -> Option<String> {
+    if grandslam_unavailable(report) {
+        return Some("HTTP 503".into());
+    }
+    // Only the first (init) request: by later steps the password has been
+    // checked, and retrying there could count as failed attempts.
+    if !report.to_string().contains("initial login request") {
+        return None;
+    }
+    for cause in report.iter_reports() {
+        if let Some(SideloadError::AuthWithMessage(code, _)) = cause.downcast_current_context::<SideloadError>() {
+            if IDENTITY_REFUSED_CODES.contains(code) {
+                return Some(format!("error {code}"));
+            }
+        }
+    }
+    None
+}
+
 /// True when Apple's sign-in server answered 502/503/504 — i.e. it refused
 /// the request without judging the credentials.
 fn grandslam_unavailable(report: &Report) -> bool {
@@ -183,27 +211,29 @@ where
                 });
                 return Ok(account);
             }
-            Err(report) if grandslam_unavailable(&report) => {
-                warn!(
-                    "Apple's sign-in server refused identity '{}' (HTTP 5xx){}",
-                    profile.label,
-                    if i + 1 < order.len() { "; trying the next one" } else { "" }
-                );
-                refused.push(profile.label);
-                if i + 1 == order.len() {
+            Err(report) => match identity_refused(&report) {
+                Some(reason) => {
+                    warn!(
+                        "Apple's sign-in server refused identity '{}' ({reason}){}",
+                        profile.label,
+                        if i + 1 < order.len() { "; trying the next one" } else { "" }
+                    );
+                    refused.push(profile.label);
+                    if i + 1 == order.len() {
+                        let err = AppError::from(report);
+                        record_login(app, LoginOutcome::AllRefused { reason });
+                        return Err(err);
+                    }
+                }
+                None => {
                     let err = AppError::from(report);
-                    record_login(app, LoginOutcome::AllRefused);
+                    record_login(app, LoginOutcome::Failed {
+                        kind: err.as_ref().to_string(),
+                        message: err.to_string(),
+                    });
                     return Err(err);
                 }
-            }
-            Err(report) => {
-                let err = AppError::from(report);
-                record_login(app, LoginOutcome::Failed {
-                    kind: err.as_ref().to_string(),
-                    message: err.to_string(),
-                });
-                return Err(err);
-            }
+            },
         }
     }
     // PROFILES is never empty, so the loop always returns.
@@ -215,7 +245,7 @@ where
 #[derive(Clone)]
 enum LoginOutcome {
     SignedIn { profile: &'static str, refused: Vec<&'static str> },
-    AllRefused,
+    AllRefused { reason: String },
     Failed { kind: String, message: String },
 }
 
@@ -422,13 +452,13 @@ fn signin_item(p: &Probe, login: Option<Stamped<LoginOutcome>>) -> StatusItem {
                 format!("Working, but Apple refused \"{}\", so A.M.Y switched to \"{profile}\" automatically", refused.join("\", \"")),
             )
             .fix("Nothing to do now. A newer iloader engine usually follows within a day or two."),
-            LoginOutcome::AllRefused => StatusItem::new(
+            LoginOutcome::AllRefused { reason } => StatusItem::new(
                 "signin",
                 L,
                 Health::Down,
-                "Apple turned away sign-in from every identity A.M.Y knows (HTTP 503)",
+                format!("Apple turned away sign-in from every identity A.M.Y knows ({reason})"),
             )
-            .fix("Usually fixed by a newer iloader engine (see the engine row), or Apple recovers on its own within hours."),
+            .fix("Try a different anisette server in Settings and sign in once more. If that fails too, it's Apple's side: wait an hour or two (repeated attempts can make it last longer) and watch the engine row for an iloader update."),
             LoginOutcome::Failed { kind, message } => classify_login_failure(&kind, &message),
         }
         .at(at_ms);
@@ -664,6 +694,27 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), PROFILES.len());
+    }
+
+    #[test]
+    fn detects_22410_at_initial_request_only() {
+        let at_init = rootcause::report!(SideloadError::AuthWithMessage(
+            -22410,
+            "This action could not be completed. Try again.".into()
+        ))
+        .context("GrandSlam error during initial login request")
+        .context("Failed to log in to Apple ID");
+        assert_eq!(identity_refused(&at_init.into_dynamic()).as_deref(), Some("error -22410"));
+
+        // Same code after the password step: never retried.
+        let later = rootcause::report!(SideloadError::AuthWithMessage(-22410, "x".into()))
+            .context("GrandSlam error during login completion");
+        assert_eq!(identity_refused(&later.into_dynamic()), None);
+
+        // Wrong password at the init step: not an identity refusal.
+        let wrong = rootcause::report!(SideloadError::AuthWithMessage(-22406, "Incorrect".into()))
+            .context("GrandSlam error during initial login request");
+        assert_eq!(identity_refused(&wrong.into_dynamic()), None);
     }
 
     #[test]

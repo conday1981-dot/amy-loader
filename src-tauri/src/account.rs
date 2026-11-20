@@ -199,8 +199,8 @@ async fn login(
 
     // A.M.Y Loader: iloader 2.4.2 hard-codes one client identity here
     // (MacBookPro13,3 / 10.12.6). A.M.Y signs in with that one first and, if
-    // Apple's sign-in server answers 502/503/504, retries with the next known
-    // identity. See amy_status.rs (PROFILES) when merging engine updates.
+    // Apple's sign-in server turns it away (HTTP 502/503/504, or -22410 at the
+    // first request), retries with the next known identity. See amy_status.rs (PROFILES) when merging engine updates.
     let mut account = crate::amy_status::login_with_failover(
         app,
         &email.to_lowercase(),
