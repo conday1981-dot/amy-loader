@@ -1,7 +1,6 @@
 use futures::FutureExt;
 use isideload::{
-    anisette::{AnisetteClientInfo, remote_v3::RemoteV3AnisetteProvider},
-    auth::apple_account::{AppleAccount, TwoFactorCallbackParams, TwoFactorCallbackResponse},
+    auth::apple_account::{TwoFactorCallbackParams, TwoFactorCallbackResponse},
     dev::{
         app_ids::{AppIdsApi, ListAppIdsResponse},
         certificates::{CertificatesApi, DevelopmentCertificate},
@@ -198,22 +197,18 @@ async fn login(
         anisette_server
     };
 
-    let mut account = AppleAccount::builder(&email.to_lowercase())
-        .anisette_provider(
-            RemoteV3AnisetteProvider::default()?
-                .set_serial_number("0".to_string())
-                .set_storage(create_sideloading_storage(app)?)
-                // just temporary while waiting for the anisette servers to start reporting this
-                .set_client_info_override(Some(AnisetteClientInfo {
-                    client_info:
-                        "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
-                            .to_string(),
-                    user_agent: "akd/1.0 CFNetwork/811.5.4".to_string(),
-                }))
-                .set_url(&anisette_url),
-        )
-        .login(password, Box::new(tfa_closure))
-        .await?;
+    // A.M.Y Loader: iloader 2.4.2 hard-codes one client identity here
+    // (MacBookPro13,3 / 10.12.6). A.M.Y signs in with that one first and, if
+    // Apple's sign-in server turns it away (HTTP 502/503/504, or -22410 at the
+    // first request), retries with the next known identity. See amy_status.rs (PROFILES) when merging engine updates.
+    let mut account = crate::amy_status::login_with_failover(
+        app,
+        &email.to_lowercase(),
+        password,
+        &anisette_url,
+        tfa_closure,
+    )
+    .await?;
 
     debug!("Logged in");
 

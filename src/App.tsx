@@ -56,6 +56,8 @@ import { AutoRefreshPanel } from "./amy/AutoRefreshPanel";
 import { TrackModal } from "./amy/TrackModal";
 import { checkForAmyUpdate, installAmyUpdate, notifyDesktop, setBackground } from "./amy/native";
 import { UPSTREAM_ENGINE_VERSION, UPSTREAM_URL } from "./amy/meta";
+import { useSystemStatus } from "./amy/status";
+import { SystemStatusChip } from "./amy/SystemStatus";
 import "./amy/strings";
 // Loaded last so the A.M.Y theme overrides iloader's component styles.
 import "./amy/amy.css";
@@ -580,6 +582,8 @@ function App() {
     };
   }, [amySettings.checkUpdates, checkUpdate]);
 
+  const systemStatus = useSystemStatus({ anisetteServer, loggedInAs, connected, selectedDevice, noKeyringAvailable });
+
   const nextRefresh = (() => {
     const upcoming = installs
       .map((r) => ({ r, at: refreshDueAt(r, amySettings.leadDays) }))
@@ -604,10 +608,7 @@ function App() {
           <h1 className="amy-title">A.M.Y LOADER</h1>
         </div>
         <div className="amy-header-chips">
-          <span className={"amy-status" + (noKeyringAvailable ? " warn" : "")}>
-            <i className="amy-dot" />
-            {noKeyringAvailable ? "KEYRING OFF" : "SECURE STORAGE OK"}
-          </span>
+          <SystemStatusChip status={systemStatus} />
           <span className="amy-status plain">v{version} · ENGINE ILOADER {UPSTREAM_ENGINE_VERSION}</span>
           <button className="amy-icon-btn" aria-label={t("app.settings")} title={t("app.settings")} onClick={() => setOpenModal("settings")}>
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
