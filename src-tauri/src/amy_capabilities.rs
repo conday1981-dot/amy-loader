@@ -1,4 +1,5 @@
-//! A.M.Y Loader: switch on HealthKit for apps that ask for it.
+//! A.M.Y Loader: switch on HealthKit for apps that ask for it, and give
+//! widget extensions their own App IDs so iOS will run them.
 //!
 //! isideload signs with whatever the free provisioning profile grants, and the
 //! only capability it switches on by itself is "increased memory limit". Apple
@@ -15,10 +16,13 @@
 //! `NSHealthUpdateUsageDescription`). iOS refuses Health access without one,
 //! so no app that doesn't need Health is touched.
 
-use isideload::dev::{
-    app_ids::{AppId, AppIdsApi},
-    developer_session::DeveloperSession,
-    teams::DeveloperTeam,
+use isideload::{
+    dev::{
+        app_ids::{AppId, AppIdsApi},
+        developer_session::DeveloperSession,
+        teams::DeveloperTeam,
+    },
+    sideload::{builder::ExtensionsBehavior, bundle::Bundle},
 };
 use reqwest::header::HeaderValue;
 use rootcause::prelude::*;
@@ -74,6 +78,39 @@ pub async fn enable_healthkit(session: &mut DeveloperSession, team: &DeveloperTe
     Ok(true)
 }
 
+/// WidgetKit extensions (home and lock screen widgets).
+const WIDGET_POINT: &str = "com.apple.widgetkit-extension";
+
+fn extension_point(bundle: &Bundle) -> Option<&str> {
+    bundle
+        .app_info
+        .get("NSExtension")?
+        .as_dictionary()?
+        .get("NSExtensionPointIdentifier")?
+        .as_string()
+}
+
+/// How to sign an app's extensions.
+///
+/// iOS only loads a widget whose signature carries its own App ID, so when an
+/// app's extensions are all widgets (at most two), each gets its own App ID.
+/// That costs one App ID per widget once (they are kept and reused at every
+/// refresh). Anything else keeps sharing the main App ID, as before, so other
+/// apps don't eat into the free account's 10-App-IDs-a-week limit.
+pub fn extensions_behavior(extensions: &[Bundle]) -> ExtensionsBehavior {
+    let points: Vec<Option<&str>> = extensions.iter().map(extension_point).collect();
+    if widgets_only(&points) {
+        tracing::info!("Widget extensions: registering their own App IDs");
+        ExtensionsBehavior::RegisterAll
+    } else {
+        ExtensionsBehavior::ReuseMain
+    }
+}
+
+fn widgets_only(points: &[Option<&str>]) -> bool {
+    !points.is_empty() && points.len() <= 2 && points.iter().all(|p| *p == Some(WIDGET_POINT))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +119,16 @@ mod tests {
     fn identifier_matches_isideload() {
         let team = DeveloperTeam { name: None, team_id: "ABCDE12345".into(), r#type: None, status: None };
         assert_eq!(app_id_identifier("uk.con.duo", &team), "uk.con.duo.ABCDE12345");
+    }
+
+    #[test]
+    fn only_widget_extensions_get_their_own_ids() {
+        let w = Some(WIDGET_POINT);
+        assert!(widgets_only(&[w]));
+        assert!(widgets_only(&[w, w]));
+        assert!(!widgets_only(&[]));
+        assert!(!widgets_only(&[w, w, w]));
+        assert!(!widgets_only(&[w, Some("com.apple.share-services")]));
+        assert!(!widgets_only(&[None]));
     }
 }
