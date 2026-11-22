@@ -180,17 +180,38 @@ fn grandslam_unavailable(report: &Report) -> bool {
 
 /// Keeps a fallback server's anisette state under its own key, so trying
 /// another server never touches the state of the one chosen in Settings.
+///
+/// Every trait method must be forwarded, not just store/retrieve: on Windows
+/// isideload's KeyringStorage overrides store_data/retrieve_data to save the
+/// anisette state as a binary secret, because as base64 text it is longer
+/// than Credential Manager's 2560-char limit. (1.2.4 only forwarded the text
+/// methods and failed with exactly that error.)
 struct PrefixedStorage {
     inner: Box<dyn SideloadingStorage>,
     prefix: String,
 }
 
+impl PrefixedStorage {
+    fn key(&self, key: &str) -> String {
+        format!("{}{key}", self.prefix)
+    }
+}
+
 impl SideloadingStorage for PrefixedStorage {
     fn store(&self, key: &str, value: &str) -> Result<(), Report> {
-        self.inner.store(&format!("{}{key}", self.prefix), value)
+        self.inner.store(&self.key(key), value)
     }
     fn retrieve(&self, key: &str) -> Result<Option<String>, Report> {
-        self.inner.retrieve(&format!("{}{key}", self.prefix))
+        self.inner.retrieve(&self.key(key))
+    }
+    fn store_data(&self, key: &str, value: &[u8]) -> Result<(), Report> {
+        self.inner.store_data(&self.key(key), value)
+    }
+    fn retrieve_data(&self, key: &str) -> Result<Option<Vec<u8>>, Report> {
+        self.inner.retrieve_data(&self.key(key))
+    }
+    fn delete(&self, key: &str) -> Result<(), Report> {
+        self.inner.delete(&self.key(key))
     }
 }
 
@@ -216,6 +237,24 @@ fn anisette_failed(report: &Report) -> bool {
     text.contains("Failed to get anisette data for login")
         || text.contains("Failed to get anisette client info")
         || text.contains("Failed to get anisette headers")
+}
+
+/// Short reason for an anisette failure: the innermost cause, trimmed.
+fn anisette_reason(report: &Report) -> String {
+    // The report prints as a tree of "● message" lines; the last is the root cause.
+    let text = report.to_string();
+    let inner = text
+        .lines()
+        .filter_map(|l| l.trim_start_matches(['│', ' ']).strip_prefix('●'))
+        .last()
+        .unwrap_or_default()
+        .trim();
+    if inner.is_empty() {
+        "anisette server failed".into()
+    } else {
+        let short: String = inner.chars().take(140).collect();
+        format!("anisette: {short}")
+    }
 }
 
 /// Servers to try: the one that rescued the last sign-in (if any), the one
@@ -273,7 +312,7 @@ where
     let servers = server_order(app, anisette_url);
     let mut refused: Vec<String> = Vec::new();
     let mut attempts = 0usize;
-    let mut last: Option<(Report, String)> = None;
+    let mut last: Option<Report> = None;
 
     for host in &servers {
         let is_configured = *host == configured;
@@ -317,12 +356,12 @@ where
                 }
                 Err(report) => {
                     let reason = identity_refused(&report)
-                        .or_else(|| anisette_failed(&report).then(|| "anisette server failed".to_string()));
+                        .or_else(|| anisette_failed(&report).then(|| anisette_reason(&report)));
                     match reason {
                         Some(reason) => {
                             warn!("Sign-in as '{}' via {host} failed ({reason}); trying the next option", profile.label);
-                            refused.push(format!("{} via {host}", profile.label));
-                            last = Some((report, reason));
+                            refused.push(format!("{} via {host}: {reason}", profile.label));
+                            last = Some(report);
                         }
                         None => {
                             let err = AppError::from(report);
@@ -338,9 +377,14 @@ where
         }
     }
 
-    if let Some((report, reason)) = last {
-        let err = AppError::from(report);
-        record_login(app, LoginOutcome::AllRefused { reason, tried: attempts });
+    if let Some(report) = last {
+        let summary = format!(
+            "A.M.Y tried {attempts} sign-in routes and none worked:\n  - {}",
+            refused.join("\n  - ")
+        );
+        warn!("{summary}");
+        let err = AppError::from(report.context(summary).into_dynamic());
+        record_login(app, LoginOutcome::AllRefused { routes: refused });
         return Err(err);
     }
     // PROFILES is never empty, so the loop always returns.
@@ -352,7 +396,7 @@ where
 #[derive(Clone)]
 enum LoginOutcome {
     SignedIn { profile: &'static str, server: Option<String>, refused: Vec<String> },
-    AllRefused { reason: String, tried: usize },
+    AllRefused { routes: Vec<String> },
     Failed { kind: String, message: String },
 }
 
@@ -564,13 +608,13 @@ fn signin_item(p: &Probe, login: Option<Stamped<LoginOutcome>>) -> StatusItem {
                 ),
             )
             .fix("Nothing to do: A.M.Y uses what worked first next time. A newer iloader engine usually follows within a day or two."),
-            LoginOutcome::AllRefused { reason, tried } => StatusItem::new(
+            LoginOutcome::AllRefused { routes } => StatusItem::new(
                 "signin",
                 L,
                 Health::Down,
-                format!("Apple turned away all {tried} sign-in routes A.M.Y knows (last: {reason})"),
+                format!("None of the {} sign-in routes worked: {}", routes.len(), routes.join(" · ")),
             )
-            .fix("It's on Apple's side. Your apps keep working until the App expiry row says otherwise, and A.M.Y retries on its own (gently, so the Apple ID isn't throttled). If something is about to expire, use Sideloadly as a stand-in."),
+            .fix("If they all say -22410 or 503, it's Apple's side: your apps keep working until the App expiry row says otherwise, and A.M.Y retries on its own (gently, so the Apple ID isn't throttled). If something is about to expire, use Sideloadly as a stand-in."),
             LoginOutcome::Failed { kind, message } => classify_login_failure(&kind, &message),
         }
         .at(at_ms);
@@ -806,6 +850,56 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), PROFILES.len());
+    }
+
+    /// Records which storage method was used, like Windows' KeyringStorage
+    /// whose text path rejects long values.
+    #[derive(Default)]
+    struct FakeStore {
+        text: Mutex<Vec<String>>,
+        binary: Mutex<Vec<String>>,
+    }
+    struct FakeHandle(std::sync::Arc<FakeStore>);
+    impl SideloadingStorage for FakeHandle {
+        fn store(&self, key: &str, value: &str) -> Result<(), Report> {
+            if value.len() > 2560 {
+                return Err(rootcause::report!("longer than platform limit of 2560 chars").into_dynamic());
+            }
+            self.0.text.lock().unwrap().push(key.to_string());
+            Ok(())
+        }
+        fn retrieve(&self, _key: &str) -> Result<Option<String>, Report> {
+            Ok(None)
+        }
+        fn store_data(&self, key: &str, _value: &[u8]) -> Result<(), Report> {
+            self.0.binary.lock().unwrap().push(key.to_string());
+            Ok(())
+        }
+        fn retrieve_data(&self, _key: &str) -> Result<Option<Vec<u8>>, Report> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn prefixed_storage_forwards_binary_saves() {
+        let fake = std::sync::Arc::new(FakeStore::default());
+        let wrapped = PrefixedStorage {
+            inner: Box::new(FakeHandle(fake.clone())),
+            prefix: "amy-ani:ani.iloader.app:".into(),
+        };
+        // An anisette state is several KB; as base64 text it would be rejected.
+        wrapped.store_data("anisette_state", &vec![7u8; 4096]).unwrap();
+        assert_eq!(*fake.binary.lock().unwrap(), vec!["amy-ani:ani.iloader.app:anisette_state".to_string()]);
+        assert!(fake.text.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn anisette_reason_is_root_cause() {
+        let r = rootcause::report!("Attribute 'password encoded as UTF-16' is longer than platform limit of 2560 chars")
+            .context("Failed to get anisette data for login")
+            .context("Failed to log in to Apple ID");
+        let reason = anisette_reason(&r.into_dynamic());
+        assert!(reason.contains("2560"), "{reason}");
     }
 
     #[test]
