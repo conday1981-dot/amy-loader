@@ -22,6 +22,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State, Window};
 
 use crate::{
+    amy_capabilities,
     device::{DeviceInfoMutex, get_provider},
     error::AppError,
     operation::Operation,
@@ -130,24 +131,60 @@ async fn run(
         .ensure_device_registered(&team, &info.name, &info.udid, None)
         .await?;
 
+    // Apps with an Apple Health usage description need HealthKit switched on
+    // for their App ID before the profile is downloaded (see amy_capabilities.rs).
+    // Best effort: if Apple refuses, the app still installs, just without Health.
+    let healthkit_bundle = crate::amy_library::ipa_info(&app_path)
+        .ok()
+        .filter(|i| i.wants_healthkit)
+        .map(|i| i.bundle_id);
+    let mut healthkit_after_first_sign = false;
+    if let Some(bundle_id) = &healthkit_bundle {
+        report.emit("sign", "Switching on Apple Health for this app", SIGN, 0.01, (0, 0));
+        match amy_capabilities::enable_healthkit(sideloader.get_dev_session(), &team, bundle_id).await {
+            Ok(true) => {}
+            Ok(false) => healthkit_after_first_sign = true, // first install: App ID not created yet
+            Err(e) => tracing::warn!("Could not switch on HealthKit for {bundle_id}: {e:?}"),
+        }
+    }
+
     report.emit("sign", "Requesting a signing certificate", SIGN, 0.02, (0, 0));
     let sign_report = report.clone();
-    let (signed_path, _special) = sideloader
+    let progress = move |value: f32| {
+        let r = sign_report.clone();
+        async move {
+            let (label, p) = sign_label(value);
+            r.emit("sign", label, SIGN, p, (0, 0));
+        }
+    };
+    let (mut signed_path, _special) = sideloader
         .sign_app(
-            app_path,
-            Some(team),
+            app_path.clone(),
+            Some(team.clone()),
             true, // increased memory limit, as iloader does
-            Some(move |value: f32| {
-                let r = sign_report.clone();
-                async move {
-                    let (label, p) = sign_label(value);
-                    r.emit("sign", label, SIGN, p, (0, 0));
-                }
-            }),
+            Some(progress.clone()),
             Some(&device.pairing),
             Some(&info.udid),
         )
         .await?;
+
+    // First install of a Health app: the App ID exists now, so switch HealthKit
+    // on and sign once more to get a profile that includes it. Later installs
+    // and refreshes skip this, because the capability stays on the App ID.
+    if let (true, Some(bundle_id)) = (healthkit_after_first_sign, &healthkit_bundle) {
+        match amy_capabilities::enable_healthkit(sideloader.get_dev_session(), &team, bundle_id).await {
+            Ok(true) => {
+                report.emit("sign", "Signing again with Apple Health switched on", SIGN, 0.5, (0, 0));
+                let _ = std::fs::remove_dir_all(&signed_path);
+                signed_path = sideloader
+                    .sign_app(app_path, Some(team), true, Some(progress), Some(&device.pairing), Some(&info.udid))
+                    .await?
+                    .0;
+            }
+            Ok(false) => tracing::warn!("App ID for {bundle_id} still missing after signing; installing without HealthKit"),
+            Err(e) => tracing::warn!("Could not switch on HealthKit for {bundle_id}: {e:?}"),
+        }
+    }
 
     // isideload reports 0–70 while uploading and 70–100 while the phone installs.
     let total = dir_size(&signed_path).max(1);

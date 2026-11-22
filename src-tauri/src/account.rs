@@ -8,7 +8,8 @@ use isideload::{
     },
     sideload::{
         SideloaderBuilder,
-        builder::{ExtensionsBehavior, ExtensionsBehaviorSelection, MaxCertsBehavior},
+        builder::{ExtensionsBehaviorSelection, MaxCertsBehavior},
+        bundle::Bundle,
         sideloader::Sideloader,
     },
     util::callbacks::{ExtensionsBehaviorCallbackBox, MaxCertsCallbackBox},
@@ -216,6 +217,12 @@ async fn login(
 
     debug!("Created developer session");
 
+    // Widgets get their own App IDs; every other extension shares the main one.
+    let extensions_callback: ExtensionsBehaviorCallbackBox = Box::new(|extensions: &[Bundle]| {
+        let behavior = crate::amy_capabilities::extensions_behavior(extensions);
+        Box::pin(async move { Ok(behavior) })
+    });
+
     let max_certs_callback: MaxCertsCallbackBox =
         Box::new(move |certs: Vec<DevelopmentCertificate>| {
             let window_clone = window.clone();
@@ -250,9 +257,7 @@ async fn login(
     let sideloader = SideloaderBuilder::new(dev_session, email.to_lowercase())
         .machine_name("iloader".into())
         .storage(create_sideloading_storage(app)?)
-        .extensions_behavior(ExtensionsBehaviorSelection::Fixed(
-            ExtensionsBehavior::ReuseMain,
-        ))
+        .extensions_behavior(ExtensionsBehaviorSelection::Prompt(extensions_callback))
         .max_certs_behavior(MaxCertsBehavior::Prompt(max_certs_callback))
         .build();
 

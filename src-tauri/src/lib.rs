@@ -15,6 +15,7 @@ mod amy; // A.M.Y Loader: tray, start with Windows, notifications
 mod amy_install; // A.M.Y Loader: install with live progress
 mod amy_library; // A.M.Y Loader: app library + update sources
 mod amy_status; // A.M.Y Loader: sign-in identity failover + status panel
+mod amy_capabilities; // A.M.Y Loader: HealthKit for apps that ask for it
 
 use crate::{
     account::{
